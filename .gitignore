@@ -1,0 +1,8 @@
+# Game content is never committed: bring your own ROM.
+*.nds
+*.sav
+build/
+*.elf
+*.prx
+*.PBP
+!/dist/

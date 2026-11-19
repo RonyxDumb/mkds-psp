@@ -1,0 +1,36 @@
+# Decomp files the port does not compile: the platform layer provides their functions natively.
+# A path ending in / excludes a folder.
+
+# C runtime: bionic's libc/libm and the compiler's runtime replace MSL and the CodeWarrior helpers.
+libs/msl/
+libs/mathlib/
+
+# Startup code (crt0, cache setup, autoload): port/platform/main.c starts the game.
+libs/NitroSDK/init/
+
+# OS: threads, interrupts, timers and the memory map run on the host.
+libs/NitroSDK/os/src/alarm_timer.c
+libs/NitroSDK/os/src/arena_cache_init.c
+libs/NitroSDK/os/src/exception_context_display.c
+libs/NitroSDK/os/src/lock_word_and_bus_ownership.c
+libs/NitroSDK/os/src/memory_protection.c
+libs/NitroSDK/os/src/reset_interrupts_halt.c
+libs/NitroSDK/os/src/thread_context_init.c
+libs/NitroSDK/os/src/tick_counter.c
+libs/NitroSDK/os/src/vblank_alarm_init.c
+
+# MI: DMA and the block copies become memcpy / geometry-engine input.
+libs/NitroSDK/mi/src/card_dma_copy.c
+libs/NitroSDK/mi/src/cpu_copy_fill.c
+libs/NitroSDK/mi/src/dma_copy_fill_wait.c
+
+# Inter-processor FIFO and the ARM7 services behind it.
+libs/NitroSDK/pxi/
+libs/NitroSDK/card/
+libs/NitroSDK/rtc/src/clock_chip_access.c
+libs/NitroSDK/spi/
+libs/NitroSDK/ctrdg/
+
+# DS Download Play: not available. The local wireless library (wm) runs; port/platform/wm7.c plays its ARM7 side.
+libs/NitroSDK/mb/
+libs/NitroSDK/wvr/

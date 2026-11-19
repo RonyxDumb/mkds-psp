@@ -1,0 +1,2 @@
+gOverlayFrmHeapBuffer kind:bss(size=0x50000) addr:0x021804e0
+
