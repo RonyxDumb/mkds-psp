@@ -42,42 +42,55 @@ void psp_show_fatal(void) {
     video_message("\nMario Kart DS has stopped. See mkds.log next to the EBOOT.\n");
 }
 
-// Each frame the game shows: input for the next one, and the picture when there is time for it. The game keeps its
-// 60 frames per second; drawing takes what is left (frame skip: after a frame that took D to draw, the next
-// ceil(D / 16.7 ms) - 1 frames are not drawn, at most MAX_SKIP).
-#define MAX_SKIP 5
+// Drawing runs in its own thread, below the game's priority: it only gets the CPU while the game waits for its next
+// VBlank, so the game always keeps its 60 frames per second and the picture takes the time that is left. At each
+// VBlank the game thread only reads the controls and captures the frame's registers (frame.c).
+static void *s_frame_sem;
+static uint64_t s_stat_render, s_stat_drawn;
+
+static void render_thread(void *arg) {
+    (void) arg;
+    for (;;) {
+        hapi_sem_wait(s_frame_sem);
+        const FrameSnapshot *f = port_frame_acquire();
+        if (!f) continue;
+        uint64_t t0 = hapi_now_ns();
+        video_present(f);
+        s_stat_render += hapi_now_ns() - t0;
+        s_stat_drawn++;
+    }
+}
+
 static void on_frame(const FrameSnapshot *f) {
-    static int to_skip;
-    static uint64_t s_stat_start, s_stat_render, s_stat_frames, s_stat_drawn;
+    static uint64_t s_stat_start, s_stat_frames;
     uint64_t t0 = hapi_now_ns();
     if (!s_stat_start) s_stat_start = t0;
     input_poll();
     s_stat_frames++;
-#ifdef PSP_NODRAW // profiling: the game alone
-    to_skip = 1;
-#endif
-    if (to_skip > 0) {
-        to_skip--;
-    } else {
-        video_present(f);
-        s_stat_drawn++;
-        uint64_t d = hapi_now_ns() - t0;
-        // At most 30 pictures per second: the CPU time left goes to the game, which must keep its 60.
-        to_skip = (int) (d / 16683000);
-        if (to_skip < 1) to_skip = 1;
-        if (to_skip > MAX_SKIP) to_skip = MAX_SKIP;
+#ifndef PSP_NODRAW // profiling: the game alone
+    // Wake the renderer if it is waiting (at most one pending wake-up).
+    SceKernelSemaInfo info;
+    info.size = sizeof(info);
+    if (sceKernelReferSemaStatus((SceUID) (intptr_t) s_frame_sem, &info) >= 0 && info.currentCount == 0) {
+        hapi_sem_post(s_frame_sem);
     }
-    s_stat_render += hapi_now_ns() - t0;
+#endif
     if (s_stat_frames == 120) {
         uint64_t total = hapi_now_ns() - s_stat_start;
         extern uint64_t g_psp_idle_ns;
         extern uint64_t g_video_stats[4];
-        port_log("perf: %u frames in %u ms (%u drawn), drawing %u ms (2D A %u B %u, 3D %u, GE wait %u), idle %u ms, "
-                 "scene %d",
-                 (unsigned) s_stat_frames, (unsigned) (total / 1000000), (unsigned) s_stat_drawn,
-                 (unsigned) (s_stat_render / 1000000), (unsigned) (g_video_stats[0] / 1000),
-                 (unsigned) (g_video_stats[1] / 1000), (unsigned) (g_video_stats[2] / 1000),
-                 (unsigned) (g_video_stats[3] / 1000), (unsigned) (g_psp_idle_ns / 1000000), f->scene);
+        extern unsigned int g_port_vblank_waits;
+        static unsigned int s_last_waits;
+        unsigned int game_frames = g_port_vblank_waits - s_last_waits;
+        s_last_waits = g_port_vblank_waits;
+        port_log("perf: %u game frames per second (60 = full speed), %u pictures; %u VBlanks in %u ms; drawing %u ms "
+                 "(2D A %u B %u, 3D %u, GE wait %u), game idle %u ms, scene %d",
+                 game_frames * 1000 / (unsigned) (total / 1000000 ? total / 1000000 : 1),
+                 (unsigned) s_stat_drawn * 1000 / (unsigned) (total / 1000000 ? total / 1000000 : 1),
+                 (unsigned) s_stat_frames, (unsigned) (total / 1000000), (unsigned) (s_stat_render / 1000000),
+                 (unsigned) (g_video_stats[0] / 1000), (unsigned) (g_video_stats[1] / 1000),
+                 (unsigned) (g_video_stats[2] / 1000), (unsigned) (g_video_stats[3] / 1000),
+                 (unsigned) (g_psp_idle_ns / 1000000), f->scene);
         memset(g_video_stats, 0, sizeof(g_video_stats));
         extern uint32_t g_ge_stats[8];
         port_log("  3D: %u cache flushes, %u textures decoded (%u Ktexels, %u ms), %u polygons, %u GE vertices, "
@@ -87,6 +100,19 @@ static void on_frame(const FrameSnapshot *f) {
                  (unsigned) g_ge_stats[6], (unsigned) g_ge_stats[7] / 1000, scePowerGetCpuClockFrequency(),
                  scePowerGetBusClockFrequency());
         memset(g_ge_stats, 0, sizeof(g_ge_stats));
+        extern uint64_t g_frame_work_ns, g_frame_work_max_ns;
+        extern uint32_t g_frame_work_count, g_frame_work_late;
+        port_log("  game frames: %u, finished on average %u us after their VBlank (max %u us), %u late",
+                 (unsigned) g_frame_work_count,
+                 (unsigned) (g_frame_work_count ? g_frame_work_ns / g_frame_work_count / 1000 : 0),
+                 (unsigned) (g_frame_work_max_ns / 1000), (unsigned) g_frame_work_late);
+        g_frame_work_ns = g_frame_work_max_ns = 0;
+        g_frame_work_count = g_frame_work_late = 0;
+        extern uint32_t g_sys_stats[6];
+        port_log("  kernel calls: clock %u, mutex %u, sem post %u, sem wait %u, thread id %u, sleep %u",
+                 (unsigned) g_sys_stats[0], (unsigned) g_sys_stats[1], (unsigned) g_sys_stats[2],
+                 (unsigned) g_sys_stats[3], (unsigned) g_sys_stats[4], (unsigned) g_sys_stats[5]);
+        memset(g_sys_stats, 0, sizeof(g_sys_stats));
         static int s_mem_log;
         if (s_mem_log++ % 10 == 0) {
             struct mallinfo mi = mallinfo();
@@ -163,7 +189,10 @@ int main(int argc, char **argv) {
     snprintf(path, sizeof(path), "%s/mkds.sav", s_dir);
     port_save_set_path(path);
 
+    s_frame_sem = hapi_sem_new();
+    psp_thread_start("mkds_render", render_thread, NULL, PSP_PRIO_RENDER, 256 * 1024);
     g_frame_hook = on_frame;
+    g_gx3d_lite_enabled = true; // at most every other frame is drawn
     audio_init();
     guest_start_game();
     sceKernelSleepThread();

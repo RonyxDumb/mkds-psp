@@ -10,6 +10,7 @@
 #define PSP_PRIO_AUDIO 0x10
 #define PSP_PRIO_MAIN 0x18
 #define PSP_PRIO_GAME 0x20
+#define PSP_PRIO_RENDER 0x30 // below the game: drawing takes the time the game leaves
 
 void psp_thread_start(const char *name, void (*fn)(void *), void *arg, int priority, int stack);
 void psp_log_open(const char *path);
@@ -22,6 +23,7 @@ void video_message(const char *text);       // a full-screen text message (missi
 
 // Screen layouts (SELECT + L / R cycles through them).
 enum {
+    LAYOUT_FULL,         // the top screen on the whole PSP screen (16:9: races are projected wide)
     LAYOUT_TOP_LARGE,    // top screen as large as it fits, the touch screen small on the right
     LAYOUT_BOTTOM_LARGE, // the same with the screens swapped
     LAYOUT_TOP_ONLY,     // only the top screen, full height

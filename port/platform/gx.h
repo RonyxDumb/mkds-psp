@@ -69,6 +69,12 @@ typedef struct Gx3dFrame {
 // The 3D list being displayed (swapped in at the last VBlank).
 const Gx3dFrame *gx3d_displayed(void);
 
+// Renderers that draw at most every other frame (the PSP): with g_gx3d_lite_enabled, the geometry engine builds a new
+// list only once the displayed one has been drawn (the renderer sets g_gx3d_drawn_serial to its serial); in between it
+// keeps the matrices and the test results the game reads, and skips vertices and polygons.
+extern bool g_gx3d_lite_enabled;
+extern uint64_t g_gx3d_drawn_serial;
+
 #ifdef __cplusplus
 }
 #endif

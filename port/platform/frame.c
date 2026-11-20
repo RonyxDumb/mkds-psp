@@ -19,14 +19,9 @@ void (*g_frame_hook)(const FrameSnapshot *snapshot);
 void *g_lockstep_ready, *g_lockstep_done;
 
 // Triple buffer: the writer fills `s_write`, publishes it as `s_ready`; the reader swaps `s_ready` with `s_read`.
-// The PSP draws each frame on the game thread (g_frame_hook) and has the memory for one snapshot only.
-#ifdef PSP
-static FrameSnapshot s_buffers[1];
-static int s_write = 0, s_read = 0;
-#else
+// (On the PSP a snapshot holds the registers, palettes and OAM only: VRAM and the 3D list are read live.)
 static FrameSnapshot s_buffers[3];
 static int s_write = 0, s_read = 2;
-#endif
 static _Atomic int s_ready = 1;
 static atomic_bool s_fresh;
 static uint64_t s_number;
@@ -101,10 +96,8 @@ void port_frame_vblank(void) {
     if (g_frame_hook) {
         g_frame_hook(f);
     }
-#ifndef PSP
     s_write = atomic_exchange(&s_ready, s_write);
     atomic_store(&s_fresh, true);
-#endif
     if (g_lockstep_ready) {
         hapi_sem_post(g_lockstep_ready);
         hapi_sem_wait(g_lockstep_done);

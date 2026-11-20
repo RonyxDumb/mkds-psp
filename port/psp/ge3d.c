@@ -378,6 +378,7 @@ typedef struct State {
     uint8_t viewport[4];
     uint8_t shadow; // 0 no, 1 shadow volume mask (polygon ID 0), 2 shadow
     uint8_t id;     // polygon ID
+    int32_t aspect; // of the projection (20.12)
 } State;
 
 // The framebuffer's alpha byte is the GE's stencil. In the 3D rectangle it holds what the DS keeps per pixel for its
@@ -422,12 +423,18 @@ static void apply_state(const State *s, const State *prev, ScreenRect r, bool bl
     if (!prev || prev->proj != s->proj) {
         sceGuSetMatrix(GU_PROJECTION, &s_projs[s->proj].m);
     }
-    if (!prev || memcmp(prev->viewport, s->viewport, 4) != 0) {
+    if (!prev || memcmp(prev->viewport, s->viewport, 4) != 0 || prev->aspect != s->aspect) {
         float sx = r.w / 256.0f, sy = r.h / 192.0f;
         int x1 = s->viewport[0], y1 = s->viewport[1], x2 = s->viewport[2], y2 = s->viewport[3];
         float vw = (float) (x2 - x1 + 1), vh = (float) (y2 - y1 + 1);
         float cx = r.x + (x1 + vw / 2) * sx, cy = r.y + (191 - y2 + vh / 2) * sy;
-        sceGuViewport(2048 - 240 + (int) (cx + 0.5f), 2048 - 136 + (int) (cy + 0.5f), (int) (vw * sx + 0.5f),
+        float w_px = vw * sx;
+        if (x1 == 0 && x2 == 255 && s->aspect > 0) {
+            // A whole-screen view keeps the shape its projection gives it: a 4:3 view on the wide screen is centred,
+            // a wide view on a 4:3 screen shows its middle.
+            w_px = vh * sy * (s->aspect / 4096.0f);
+        }
+        sceGuViewport(2048 - 240 + (int) (cx + 0.5f), 2048 - 136 + (int) (cy + 0.5f), (int) (w_px + 0.5f),
                       (int) (vh * sy + 0.5f));
     }
     if (!prev || prev->tex != s->tex || prev->teximage != s->teximage) {
@@ -462,12 +469,13 @@ static void apply_state(const State *s, const State *prev, ScreenRect r, bool bl
 }
 
 static inline uint32_t vertex_color(float r, float g, float b, uint32_t a) {
-    uint32_t ir = (uint32_t) (r * (255.0f / 31.0f) + 0.5f), ig = (uint32_t) (g * (255.0f / 31.0f) + 0.5f),
-             ib = (uint32_t) (b * (255.0f / 31.0f) + 0.5f);
-    if (ir > 255) ir = 255;
-    if (ig > 255) ig = 255;
-    if (ib > 255) ib = 255;
-    return ir | ig << 8 | ib << 16 | a << 24;
+    // Signed conversions (cvt.w.s): unsigned ones go through the C library on the PSP.
+    int ir = (int) (r * (255.0f / 31.0f) + 0.5f), ig = (int) (g * (255.0f / 31.0f) + 0.5f),
+        ib = (int) (b * (255.0f / 31.0f) + 0.5f);
+    ir = ir < 0 ? 0 : ir > 255 ? 255 : ir;
+    ig = ig < 0 ? 0 : ig > 255 ? 255 : ig;
+    ib = ib < 0 ? 0 : ib > 255 ? 255 : ib;
+    return (uint32_t) ir | (uint32_t) ig << 8 | (uint32_t) ib << 16 | a << 24;
 }
 
 void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
@@ -545,6 +553,7 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
             st.depth_write = (p->attr >> 11) & 1;
             st.shadow = mode == 3 ? (id == 0 ? 1 : 2) : 0;
             st.id = id;
+            st.aspect = p->aspect;
             st.proj = p->proj;
             memcpy(st.viewport, p->viewport, 4);
             if (!have_prev || memcmp(&st, &prev_state, sizeof(st)) != 0) {
@@ -643,4 +652,6 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
     sceGuTexWrap(GU_CLAMP, GU_CLAMP);
     sceGuScissor(0, 0, 480, 272);
     sceGuViewport(2048, 2048, 480, 272);
+    // The list is read: the geometry engine may build the next complete one (gx.h, lite lists).
+    g_gx3d_drawn_serial = f->serial;
 }

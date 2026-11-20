@@ -61,6 +61,12 @@ static void wav_header(FILE *f, uint32_t frames) {
 static bool s_bglog;
 static int32_t s_wide_fx;
 static bool on_frame(const FrameSnapshot *f, uint64_t n) {
+    if (getenv("MKDS_WAITLOG") && n % 120 == 0) {
+        extern unsigned int g_port_vblank_waits;
+        static unsigned int last;
+        port_log("waits %llu: %u game frames per 120 VBlanks (scene %d)", (unsigned long long) n, g_port_vblank_waits - last, f->scene);
+        last = g_port_vblank_waits;
+    }
     if (s_bglog && getenv("MKDS_OAM") && n == (uint64_t) atoi(getenv("MKDS_OAM"))) {
         const uint16_t *oam = (const uint16_t *) f->oam;
         for (int i = 0; i < 128; i++) {

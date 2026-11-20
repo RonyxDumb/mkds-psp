@@ -41,12 +41,17 @@ void hapi_abort(void) {
 }
 
 // ------------------------------------------------------------------------------------------------ time
-uint64_t hapi_now_ns(void) { return (uint64_t) sceKernelGetSystemTimeWide() * 1000ull; }
+uint32_t g_sys_stats[6]; // kernel calls per kind (statistics): clock, mutex, sem post, sem wait, thread id, sleep
+uint64_t hapi_now_ns(void) {
+    g_sys_stats[0]++;
+    return (uint64_t) sceKernelGetSystemTimeWide() * 1000ull;
+}
 
 uint64_t g_psp_idle_ns; // time the game spent waiting (statistics)
 
 void hapi_sleep_ns(uint64_t ns) {
     uint64_t us = ns / 1000;
+    g_sys_stats[5]++;
     if (us) {
         uint64_t t0 = sceKernelGetSystemTimeWide();
         sceKernelDelayThread((SceUInt) (us > 0x7fffffff ? 0x7fffffff : us));
@@ -70,13 +75,13 @@ void hapi_local_time(HostTime *out) {
 // ------------------------------------------------------------------------------------------------ synchronisation
 // Handles are kernel UIDs stored in the pointer.
 void *hapi_mutex_new(void) { return (void *) (intptr_t) sceKernelCreateSema("mkds_mutex", 0, 1, 1, NULL); }
-void hapi_mutex_lock(void *m) { sceKernelWaitSema((SceUID) (intptr_t) m, 1, NULL); }
+void hapi_mutex_lock(void *m) { g_sys_stats[1]++; sceKernelWaitSema((SceUID) (intptr_t) m, 1, NULL); }
 void hapi_mutex_unlock(void *m) { sceKernelSignalSema((SceUID) (intptr_t) m, 1); }
 
 void *hapi_sem_new(void) { return (void *) (intptr_t) sceKernelCreateSema("mkds_sem", 0, 0, 0x7fffffff, NULL); }
 void hapi_sem_free(void *s) { sceKernelDeleteSema((SceUID) (intptr_t) s); }
-void hapi_sem_post(void *s) { sceKernelSignalSema((SceUID) (intptr_t) s, 1); }
-void hapi_sem_wait(void *s) { sceKernelWaitSema((SceUID) (intptr_t) s, 1, NULL); }
+void hapi_sem_post(void *s) { g_sys_stats[2]++; sceKernelSignalSema((SceUID) (intptr_t) s, 1); }
+void hapi_sem_wait(void *s) { g_sys_stats[3]++; sceKernelWaitSema((SceUID) (intptr_t) s, 1, NULL); }
 
 // ------------------------------------------------------------------------------------------------ threads
 typedef struct Start {
@@ -127,6 +132,7 @@ static struct {
 } s_tls[TLS_MAX];
 
 void *hapi_tls_get(void) {
+    g_sys_stats[4]++;
     SceUID self = sceKernelGetThreadId();
     for (int i = 0; i < TLS_MAX; i++) {
         if (s_tls[i].thread == self) return s_tls[i].value;

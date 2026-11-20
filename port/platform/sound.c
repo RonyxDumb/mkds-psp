@@ -993,6 +993,38 @@ static void output_effect(float *l, float *r, int rate) {
 // sample data until the loop point; ADPCM, PSG and noise go through channel_sample.
 static void mix_channel(Channel *c, int32_t *acc, int n) {
     int32_t gl = (int32_t) (c->gain_l * 4096.0f), gr = (int32_t) (c->gain_r * 4096.0f);
+    if (c->type == CH_PCM && c->format == 2) {
+        // ADPCM: decoded as the position passes each sample.
+        uint64_t pos = c->pos, step = c->step;
+        uint32_t end = c->loop_start + c->loop_len;
+        for (int k = 0; k < n; k++) {
+            uint32_t i = (uint32_t) (pos >> 32);
+            int smp;
+            if (i >= end) {
+                c->pos = pos;
+                if (!channel_sample(c, &smp)) {
+                    channel_stop(c);
+                    return;
+                }
+                pos = c->pos;
+            } else {
+                while ((uint32_t) c->adpcm_pos <= i) {
+                    if ((uint32_t) c->adpcm_pos == c->loop_start && !c->loop_saved) {
+                        c->loop_sample = c->adpcm_sample;
+                        c->loop_index = c->adpcm_index;
+                        c->loop_saved = true;
+                    }
+                    c->last_sample = adpcm_next(c);
+                }
+                smp = c->last_sample;
+            }
+            acc[k * 2] += smp * gl;
+            acc[k * 2 + 1] += smp * gr;
+            pos += step;
+        }
+        c->pos = pos;
+        return;
+    }
     if (c->type == CH_PCM && c->format <= 1) {
         uint64_t pos = c->pos, step = c->step;
         uint32_t end = c->loop_start + c->loop_len;

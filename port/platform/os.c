@@ -40,6 +40,7 @@
 volatile bool g_quit;
 volatile bool g_paused; // the app is in the background: the game stops at its next wait
 uint32_t g_vblank_rate_mhz = 59826;
+unsigned int g_port_vblank_waits; // VBlank waits of the game (one per frame of its main loop)
 
 // ------------------------------------------------------------------------------------------------ logging
 void port_log(const char *fmt, ...) {
@@ -370,6 +371,17 @@ int64_t port_os_vblank_phase_ns(void) { return (int64_t) (os_time_ns() - s_last_
 int64_t port_os_vblank_period_ns(void) { return (int64_t) vblank_period_ns(); }
 void port_os_shift_vblank(int64_t ns) {
     if (g_vblank_rate_mhz) s_next_vblank_ns += (uint64_t) ns;
+}
+
+// Statistics: how long after its VBlank each frame of the game's main loop finished (it then waits for the next).
+uint64_t g_frame_work_ns, g_frame_work_max_ns;
+uint32_t g_frame_work_count, g_frame_work_late;
+void port_os_frame_done(void) {
+    uint64_t d = os_time_ns() - s_last_vblank_ns;
+    g_frame_work_ns += d;
+    if (d > g_frame_work_max_ns) g_frame_work_max_ns = d;
+    g_frame_work_count++;
+    if (d > vblank_period_ns()) g_frame_work_late++;
 }
 
 // How late the current VBlank runs behind its due time (the PSP skips drawing frames when it falls behind).

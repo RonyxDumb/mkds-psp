@@ -66,7 +66,11 @@ static struct {
     bool proj_aspect_dirty;
     bool proj_list_dirty; // the projection changed since the last one recorded in the list
     bool results_dirty;   // the clip / vector matrix result registers are out of date
+    bool lite;            // the list being built will not be drawn: no vertices, no polygons (see gx3d.h)
 } G;
+
+bool g_gx3d_lite_enabled;
+uint64_t g_gx3d_drawn_serial;
 
 // ------------------------------------------------------------------------------------------------ matrix helpers
 static void mtx_identity(Mtx *m) {
@@ -274,6 +278,7 @@ static void emit_polygon(const GxVertex *v, int count) {
 }
 
 static void submit_vertex(void) {
+    if (G.lite) return;
     update_clip();
     GxVertex v;
     const fx32 *m = G.clip.m;
@@ -514,7 +519,7 @@ static void execute(uint32_t cmd) {
             G.ts = (int16_t) ((((int64_t) n0[0] * t[0] + (int64_t) n0[1] * t[4] + (int64_t) n0[2] * t[8]) >> 21) + G.s);
             G.tt = (int16_t) ((((int64_t) n0[0] * t[1] + (int64_t) n0[1] * t[5] + (int64_t) n0[2] * t[9]) >> 21) + G.t);
         }
-        light_vertex(p[0]);
+        if (!G.lite) light_vertex(p[0]);
         break;
     case 0x22: // TEXCOORD
         G.s = (int16_t) p[0];
@@ -709,9 +714,40 @@ static inline __attribute__((always_inline)) void fifo_word(uint32_t word) {
 }
 
 void gx3d_fifo_write(uint32_t word) { fifo_word(word); }
-// A block of GXFIFO words (display lists sent by DMA or CPU copy).
+// A block of GXFIFO words (display lists sent by DMA or CPU copy). Packed commands whose parameters are all in the
+// block are decoded here directly (no per-word state); in a lite list the vertex commands are skipped unread.
+static inline bool lite_skippable(uint32_t cmd) { return cmd == 0x21 || (cmd >= 0x23 && cmd <= 0x28); }
+
 void gx3d_fifo_write_block(const uint32_t *words, uint32_t count) {
-    for (uint32_t i = 0; i < count; i++) fifo_word(words[i]);
+    uint32_t i = 0;
+    while (i < count) {
+        if (G.packed_left != 0) { // in the middle of a packed command (from an earlier block)
+            fifo_word(words[i++]);
+            continue;
+        }
+        uint32_t cmds = words[i++];
+        for (int k = 0; k < 4 && cmds != 0; k++, cmds >>= 8) {
+            uint32_t cmd = cmds & 0xff;
+            uint32_t np = s_param_count[cmd];
+            if (np == 0) {
+                if (valid_command(cmd)) execute(cmd);
+                continue;
+            }
+            if (i + np > count) {
+                // Its parameters continue in the next block: the word-by-word decoder takes over.
+                G.packed = cmds;
+                G.packed_left = (uint32_t) (4 - k);
+                G.param_index = 0;
+                while (i < count) fifo_word(words[i++]);
+                return;
+            }
+            if (!(G.lite && lite_skippable(cmd))) {
+                for (uint32_t j = 0; j < np; j++) G.params[j] = words[i + j];
+                execute(cmd);
+            }
+            i += np;
+        }
+    }
 }
 void gx3d_command(uint32_t cmd, uint32_t param) { feed(cmd, param); }
 
@@ -773,10 +809,15 @@ void gx3d_vblank(void) {
     done->swap_param = G.swap_param;
     latch_render_registers(done);
     static uint64_t serial;
-    done->serial = ++serial;
-    G.displayed = G.building;
-    G.building ^= 1;
+    if (!G.lite) {
+        done->serial = ++serial;
+        G.displayed = G.building;
+        G.building ^= 1;
+    } // a lite list is dropped: the last complete one stays displayed
     Gx3dFrame *next = building();
+    // The next list is lite while the displayed one has not been drawn yet (and not during display capture, which
+    // takes every list: dual-screen 3D).
+    G.lite = g_gx3d_lite_enabled && G.frames[G.displayed].serial != g_gx3d_drawn_serial && !(IO8(0x67) & 0x80);
     next->polygon_count = 0;
     next->proj_count = 0;
     next->proj_aspect = 0;

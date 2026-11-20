@@ -16,6 +16,14 @@ void OS_WaitIrq(u32 clear, u32 irqFlags) {
     IrqCheckView *dtcm;
     u32 *pendingFlags;
 
+#ifdef PLATFORM_PORT
+    extern unsigned int g_port_vblank_waits; // PORT: statistics (frames of the game's main loop)
+    if (irqFlags & 1) {
+        g_port_vblank_waits++;
+        extern void port_os_frame_done(void);
+        port_os_frame_done();
+    }
+#endif
     enabled = OS_DisableInterrupts();
     dtcm = (IrqCheckView *) HW_DTCM;
     if (clear != 0) {

@@ -39,14 +39,19 @@ The save file (`mkds.sav`) and a log (`mkds.log`) are written next to the EBOOT.
 | SELECT + Cross | touches the touch screen at the pointer |
 | SELECT + L / SELECT + R | previous / next screen layout |
 
-Screen layouts: by default races show the top screen as large as the PSP's screen allows, with the touch screen
-(the map) small on its right; menus show both screens side by side. SELECT + L / R switches between: top screen large,
-touch screen large, top screen only, side by side (and back to automatic after the last one).
+Screen layouts: races fill the whole PSP screen (the race camera is projected 16:9, the HUD is stretched to the
+width); menus show both screens side by side. SELECT + L / R switches between: whole screen, top screen large with
+the touch screen (the map) small on its right, touch screen large, top screen only (4:3), side by side, and back to
+automatic after the last one. The race camera's shape follows the choice from the next race.
 
 ## Performance
-The game runs at its full speed (60 frames per second) on a PSP at 333 MHz; the picture is drawn at most 30 times
-per second, fewer when there is no time for it, without slowing the game down. In races the HUD is redrawn every
-other picture and the map every third; sound is mixed at 22 kHz.
+The game keeps its full speed (60 frames per second). Drawing runs in its own thread below the game's priority: it
+only uses the time the game leaves while it waits for the next VBlank, so a slow picture never slows the game down.
+The geometry engine builds a complete 3D list only once the renderer has drawn the last one, and skips the vertex
+work of the lists in between. In races the HUD is redrawn every other picture; sound is mixed at 22 kHz.
+
+`mkds.log`, next to the EBOOT, reports every 2 seconds the game's frames per second, the pictures per second and
+where the time goes.
 
 ## Building
 Requirements: the [PSP SDK](https://github.com/pspdev/pspdev) (`psp-cmake`), CMake, Ninja, Python 3.
