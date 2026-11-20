@@ -558,9 +558,10 @@ bool fast2d_render_engine(const FrameSnapshot *f, bool is_a, Fast2dEngineOut *ou
     setup(e, f, is_a);
     uint32_t display = (e->dispcnt >> 16) & 3;
     if (!is_a && display > 1) display = 1;
-    if (display == 3 || (is_a && (f->io[0x67] & 0x80))) {
-        return false; // main memory display, display capture
+    if (display == 3) {
+        return false; // main memory display
     }
+    out->capture = is_a && (f->io[0x67] & 0x80);
     for (int bg = 0; bg < 4; bg++) {
         if ((e->dispcnt & (0x100u << bg)) && (io16(e, 0x08 + bg * 2) & 0x40)) return false; // mosaic
     }

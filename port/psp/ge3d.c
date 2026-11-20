@@ -249,7 +249,47 @@ typedef struct State {
     bool depth_write;
     uint8_t proj;
     uint8_t viewport[4];
+    uint8_t shadow; // 0 no, 1 shadow volume mask (polygon ID 0), 2 shadow
+    uint8_t id;     // polygon ID
 } State;
+
+// The framebuffer's alpha byte is the GE's stencil. In the 3D rectangle it holds what the DS keeps per pixel for its
+// shadows: the polygon ID of the opaque pixel (bits 0-5) and the shadow mark (bit 7).
+static void stencil_state(const State *s) {
+    if (s->shadow == 1) {
+        // Mask: marks the pixels where the volume is behind what was drawn (the depth test fails). No colour.
+        sceGuPixelMask(0x7fffffff);
+        sceGuStencilFunc(GU_ALWAYS, 0x80, 0xff);
+        sceGuStencilOp(GU_KEEP, GU_REPLACE, GU_KEEP);
+    } else if (s->shadow == 2) {
+        sceGuPixelMask(0x7f000000); // colour and the mark only
+        sceGuStencilFunc(GU_EQUAL, 0x80, 0x80);
+        sceGuStencilOp(GU_KEEP, GU_KEEP, GU_ZERO);
+    } else if (!s->translucent) {
+        // Opaque pixels record their polygon ID.
+        sceGuPixelMask(0);
+        sceGuStencilFunc(GU_ALWAYS, s->id, 0xff);
+        sceGuStencilOp(GU_KEEP, GU_KEEP, GU_REPLACE);
+    } else {
+        sceGuPixelMask(0);
+        sceGuStencilFunc(GU_ALWAYS, 0, 0);
+        sceGuStencilOp(GU_KEEP, GU_KEEP, GU_KEEP);
+    }
+}
+
+// Draws a batch of triangles in state s.
+static void draw_batch(const State *s, GeVertex *v, int count) {
+    if (count <= 0) return;
+    if (s->shadow == 2) {
+        // First no shadow on the pixels of its own polygon ID: their mark is cleared (nothing drawn).
+        sceGuPixelMask(0x7fffffff);
+        sceGuStencilFunc(GU_EQUAL, 0x80 | s->id, 0xbf);
+        sceGuStencilOp(GU_KEEP, GU_KEEP, GU_ZERO);
+        sceGuDrawArray(GU_TRIANGLES, GE_VERTEX_FORMAT, count, 0, v);
+        stencil_state(s);
+    }
+    sceGuDrawArray(GU_TRIANGLES, GE_VERTEX_FORMAT, count, 0, v);
+}
 
 static void apply_state(const State *s, const State *prev, ScreenRect r, bool blending) {
     if (!prev || prev->proj != s->proj) {
@@ -279,8 +319,12 @@ static void apply_state(const State *s, const State *prev, ScreenRect r, bool bl
     if (!prev || prev->mode != s->mode) {
         sceGuTexFunc(s->mode == 1 ? GU_TFX_DECAL : GU_TFX_MODULATE, GU_TCC_RGBA);
     }
-    if (!prev || prev->translucent != s->translucent || prev->depth_write != s->depth_write) {
-        if (s->translucent && blending) {
+    if (!prev || prev->translucent != s->translucent || prev->depth_write != s->depth_write ||
+        prev->shadow != s->shadow) {
+        if (s->shadow) {
+            sceGuEnable(GU_BLEND);
+            sceGuDepthMask(GU_TRUE);
+        } else if (s->translucent && blending) {
             sceGuEnable(GU_BLEND);
             sceGuDepthMask(s->depth_write ? GU_FALSE : GU_TRUE); // sceGuDepthMask(GU_TRUE) disables writes
         } else {
@@ -333,7 +377,9 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
     uint32_t cc = f->clear_color;
     uint32_t calpha = (cc >> 16) & 31;
     sceGuClearDepth(0);
-    sceGuClear(GU_DEPTH_BUFFER_BIT);
+    sceGuClearStencil(0);
+    sceGuClear(GU_DEPTH_BUFFER_BIT | GU_STENCIL_BUFFER_BIT);
+    sceGuEnable(GU_STENCIL_TEST);
     if (calpha) {
         GeVertex *q = sceGuGetMemory(sizeof(GeVertex) * 2);
         uint32_t col = vertex_color((float) (cc & 31), (float) ((cc >> 5) & 31), (float) ((cc >> 10) & 31),
@@ -357,8 +403,8 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
             uint32_t alpha = (p->attr >> 16) & 31;
             uint32_t fmt = texturing ? (p->teximage >> 26) & 7 : 0;
             uint32_t mode = (p->attr >> 4) & 3;
-            if (mode == 3) continue; // shadow volumes: not drawn yet
-            bool translucent = (alpha != 0 && alpha != 31) || fmt == 1 || fmt == 6;
+            uint8_t id = (uint8_t) ((p->attr >> 24) & 63);
+            bool translucent = (alpha != 0 && alpha != 31) || fmt == 1 || fmt == 6 || mode == 3;
             if (translucent != (pass == 1)) continue;
             if (alpha == 0) continue; // wireframe
             if (!s_projs[p->proj].ok) continue;
@@ -370,14 +416,16 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
             st.mode = mode == 1 ? 1 : 0;
             st.translucent = translucent;
             st.depth_write = (p->attr >> 11) & 1;
+            st.shadow = mode == 3 ? (id == 0 ? 1 : 2) : 0;
+            st.id = id;
             st.proj = p->proj;
             memcpy(st.viewport, p->viewport, 4);
             if (!have_prev || memcmp(&st, &prev_state, sizeof(st)) != 0) {
                 if (have_prev && s_vert_count > batch_first) {
-                    sceGuDrawArray(GU_TRIANGLES, GE_VERTEX_FORMAT, (int) (s_vert_count - batch_first), 0,
-                                   s_verts + batch_first);
+                    draw_batch(&prev_state, s_verts + batch_first, (int) (s_vert_count - batch_first));
                 }
                 apply_state(&st, have_prev ? &prev_state : NULL, r, blending);
+                stencil_state(&st);
                 prev_state = st;
                 have_prev = true;
                 batch_first = s_vert_count;
@@ -446,13 +494,15 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
         }
     }
     if (have_prev && s_vert_count > batch_first) {
-        sceGuDrawArray(GU_TRIANGLES, GE_VERTEX_FORMAT, (int) (s_vert_count - batch_first), 0, s_verts + batch_first);
+        draw_batch(&prev_state, s_verts + batch_first, (int) (s_vert_count - batch_first));
     }
     sceKernelDcacheWritebackRange(s_verts, sizeof(GeVertex) * s_vert_count);
 
     sceGuDisable(GU_DEPTH_TEST);
     sceGuDisable(GU_ALPHA_TEST);
     sceGuDisable(GU_BLEND);
+    sceGuDisable(GU_STENCIL_TEST);
+    sceGuPixelMask(0);
     sceGuDepthMask(GU_TRUE);
     sceGuDisable(GU_CLIP_PLANES);
     sceGuEnable(GU_TEXTURE_2D);

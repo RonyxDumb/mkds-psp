@@ -7,6 +7,7 @@
 
 #include <pspdisplay.h>
 #include <pspgu.h>
+#include <pspge.h>
 #include <pspkernel.h>
 #include <pspdebug.h>
 #include <malloc.h>
@@ -113,6 +114,18 @@ static void draw_texture(const void *tex, int psm, ScreenRect r) {
     sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2 * strips, 0, v);
 }
 
+// The same with the texture already bound (256x192 texels of it).
+static void draw_texture_bound(ScreenRect r) {
+    const int strips = 8;
+    Vertex *v = sceGuGetMemory(sizeof(Vertex) * 2 * strips);
+    for (int i = 0; i < strips; i++) {
+        float u0 = 256.0f * i / strips, u1 = 256.0f * (i + 1) / strips;
+        v[i * 2] = (Vertex) {u0, 0, r.x + r.w * i / strips, r.y, 0};
+        v[i * 2 + 1] = (Vertex) {u1, 192, r.x + r.w * (i + 1) / strips, r.y + r.h, 0};
+    }
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2 * strips, 0, v);
+}
+
 typedef struct ColorVertex {
     unsigned int color;
     float x, y, z;
@@ -138,6 +151,9 @@ static void draw_brightness(uint16_t reg, ScreenRect r) {
 static uint16_t *s_engine[2];  // fast2d outputs, BGR555 | 0x8000 (GU_PSM_5551)
 static uint32_t *s_above;      // engine A above the 3D layer
 static int s_frame_parity;
+static void *s_draw_buffer = (void *) 0; // the GE's current draw buffer (VRAM offset)
+// Display capture: engine A is drawn at the DS size into this buffer, read back into the VRAM bank, then shown scaled.
+#define CAPTURE_BUFFER ((void *) (BUF_WIDTH * SCR_HEIGHT * 4 * 2 + BUF_WIDTH * SCR_HEIGHT * 2))
 uint64_t g_video_stats[4]; // us: engine A, engine B, 3D lists, waiting for the GE
 
 void video_present(const FrameSnapshot *f) {
@@ -198,6 +214,12 @@ void video_present(const FrameSnapshot *f) {
     } else {
         for (int eng = 0; eng < 2; eng++) {
             ScreenRect r = (eng == 0) == a_top ? top : bottom;
+            ScreenRect shown = r;
+            if (eng == 0 && out[0].capture) {
+                sceGuDrawBufferList(GU_PSM_8888, CAPTURE_BUFFER, BUF_WIDTH);
+                r = (ScreenRect) {0, 0, 256, 192};
+                sceGuScissor(0, 0, 256, 192);
+            }
             draw_texture(s_engine[eng], GU_PSM_5551, r);
             if (eng == 0 && out[0].split) {
                 sceGuEnable(GU_BLEND);
@@ -209,6 +231,24 @@ void video_present(const FrameSnapshot *f) {
                 draw_texture(s_above, GU_PSM_8888, r);
                 sceGuDisable(GU_BLEND);
             }
+            if (eng == 0 && out[0].capture) {
+                // Read back what engine A shows (before its master brightness) into the VRAM bank.
+                sceGuFinish();
+                sceGuSync(0, 0);
+                static uint32_t capture[256 * 192];
+                const uint32_t *fb = (const uint32_t *) ((uintptr_t) sceGeEdramGetAddr() + (uintptr_t) CAPTURE_BUFFER);
+                fb = (const uint32_t *) ((uintptr_t) fb | 0x40000000u); // uncached
+                for (int y = 0; y < 192; y++) memcpy(capture + y * 256, fb + y * BUF_WIDTH, 256 * 4);
+                gpu2d_capture(f, capture, capture);
+                sceGuStart(GU_DIRECT, s_list);
+                sceGuDrawBufferList(GU_PSM_8888, s_draw_buffer, BUF_WIDTH);
+                sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
+                sceGuTexMode(GU_PSM_8888, 0, 0, 0);
+                sceGuTexImage(0, 512, 256, BUF_WIDTH, (void *) ((uintptr_t) sceGeEdramGetAddr() + (uintptr_t) CAPTURE_BUFFER));
+                sceGuTexFlush();
+                draw_texture_bound(shown);
+                r = shown;
+            }
             draw_brightness(out[eng].brightness, r);
         }
     }
@@ -217,7 +257,7 @@ void video_present(const FrameSnapshot *f) {
     uint64_t t4 = sceKernelGetSystemTimeWide();
     sceGuSync(0, 0);
     g_video_stats[3] += sceKernelGetSystemTimeWide() - t4;
-    sceGuSwapBuffers();
+    s_draw_buffer = sceGuSwapBuffers();
 }
 
 void video_message(const char *text) {
