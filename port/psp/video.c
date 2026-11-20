@@ -162,6 +162,7 @@ static int s_frame_parity;
 static bool s_list_pending;              // the GE is drawing a frame that has not been shown yet
 static void *s_draw_buffer = (void *) 0; // the GE's current draw buffer (VRAM offset)
 uint64_t g_video_stats[4]; // us: engine A, engine B, 3D lists, waiting for the GE
+uint32_t g_ge_parts[3];    // us of GE work, one picture in 60: 2D under the 3D (with the clear), 3D, 2D above
 // Display capture: engine A is drawn at the DS size into this buffer, read back into the VRAM bank, then shown scaled.
 #define CAPTURE_BUFFER ((void *) (BUF_WIDTH * SCR_HEIGHT * 4 * 2 + BUF_WIDTH * SCR_HEIGHT * 2))
 
@@ -182,8 +183,10 @@ static bool engine_output(const FrameSnapshot *f, int eng, bool redraw, Fast2dEn
         s_engine_valid[eng] = false;
         return false;
     }
-    sceKernelDcacheWritebackRange(o.out, 256 * 192 * 2);
-    if (o.split) sceKernelDcacheWritebackRange(o.above, 256 * 192 * (o.above_5551 ? 2 : 4));
+    if (!((uintptr_t) o.out & 0x40000000u)) { // in main memory (not the GE's, uncached)
+        sceKernelDcacheWritebackRange(o.out, 256 * 192 * 2);
+        if (o.split) sceKernelDcacheWritebackRange(o.above, 256 * 192 * (o.above_5551 ? 2 : 4));
+    }
     s_engine_buf[eng] = buf;
     s_engine_out[eng] = o;
     s_engine_valid[eng] = true;
@@ -216,10 +219,14 @@ static void finish_pending(void) {
 void video_present(const FrameSnapshot *f) {
     if (s_debug_screen) return;
     if (!s_engine[0][0]) {
-        for (int b = 0; b < 2; b++) {
-            for (int e = 0; e < 2; e++) s_engine[e][b] = memalign(64, 256 * 192 * 2);
-            s_above[b] = memalign(64, 256 * 192 * 4);
-        }
+        // Engine A (the top screen, with the 3D) straight into the GE's own memory, after the framebuffers, the
+        // depth buffer and the capture buffer: the GE reads its textures far faster from there. One buffer is
+        // enough: the GE is done with a picture before the next one is drawn.
+        uintptr_t edram = (uintptr_t) sceGeEdramGetAddr() | 0x40000000u; // uncached
+        uintptr_t free_at = (uintptr_t) CAPTURE_BUFFER + BUF_WIDTH * 192 * 4;
+        s_engine[0][0] = s_engine[0][1] = (uint16_t *) (edram + free_at);
+        s_above[0] = s_above[1] = (uint32_t *) (edram + free_at + 256 * 192 * 2);
+        for (int b = 0; b < 2; b++) s_engine[1][b] = memalign(64, 256 * 192 * 2);
     }
     static unsigned s_drawn;
     s_drawn++;
@@ -269,7 +276,23 @@ void video_present(const FrameSnapshot *f) {
 
     // The last frame is done (it was drawing while the CPU worked): show it, and draw this one.
     finish_pending();
+    // Every 2 seconds the GE's work is timed in parts (log: "GE parts").
+    static unsigned s_diag_counter;
+    bool diag = ++s_diag_counter % 60 == 0;
+    uint64_t diag_t = 0;
+#define DIAG(slot)                                                                                                     \
+    do {                                                                                                               \
+        if (diag) {                                                                                                    \
+            send_list();                                                                                               \
+            sceGuSync(0, 0);                                                                                           \
+            uint64_t now = sceKernelGetSystemTimeWide();                                                               \
+            g_ge_parts[slot] = (uint32_t) (now - diag_t);                                                              \
+            begin_list();                                                                                              \
+            diag_t = sceKernelGetSystemTimeWide();                                                                     \
+        }                                                                                                              \
+    } while (0)
     begin_list();
+    diag_t = sceKernelGetSystemTimeWide();
     sceGuClearColor(0xff000000);
     sceGuClear(GU_COLOR_BUFFER_BIT);
     sceGuTexFlush();
@@ -288,15 +311,18 @@ void video_present(const FrameSnapshot *f) {
                 sceGuScissor(0, 0, 256, 192);
             }
             draw_texture(out[eng].out, GU_PSM_5551, r);
+            if (eng == 0) DIAG(0);
             if (eng == 0 && out[0].split) {
                 uint64_t t3 = sceKernelGetSystemTimeWide();
                 const Gx3dFrame *g3 = gx3d_lock_displayed();
                 ge3d_draw(g3, f, r);
                 gx3d_unlock(g3);
                 g_video_stats[2] += sceKernelGetSystemTimeWide() - t3;
+                DIAG(1);
                 sceGuEnable(GU_BLEND);
                 draw_texture(out[0].above, out[0].above_5551 ? GU_PSM_5551 : GU_PSM_8888, r);
                 sceGuDisable(GU_BLEND);
+                DIAG(2);
             }
             if (eng == 0 && out[0].capture) {
                 // Read back what engine A shows (before its master brightness) into the VRAM bank.

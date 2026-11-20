@@ -85,6 +85,32 @@ static uint16_t pal_entry(const VramMap *map, uint32_t off) {
     return p ? (uint16_t) (p[0] | p[1] << 8) : 0;
 }
 
+// Swizzles a 16-bit texture (width * 2 bytes a multiple of 16, height of 8: every DS texture) into a new block;
+// frees the linear one.
+static uint16_t *swizzle16(uint16_t *lin, uint32_t w, uint32_t h) {
+    uint16_t *sw = memalign(16, w * h * 2);
+    if (!sw) {
+        free(lin);
+        return NULL;
+    }
+    uint32_t row_bytes = w * 2, blocks_x = row_bytes / 16;
+    const uint8_t *in = (const uint8_t *) lin;
+    uint32_t *out = (uint32_t *) sw;
+    for (uint32_t by = 0; by < h / 8; by++) {
+        for (uint32_t bx = 0; bx < blocks_x; bx++) {
+            for (uint32_t y = 0; y < 8; y++) {
+                const uint32_t *src = (const uint32_t *) (in + (by * 8 + y) * row_bytes + bx * 16);
+                *out++ = src[0];
+                *out++ = src[1];
+                *out++ = src[2];
+                *out++ = src[3];
+            }
+        }
+    }
+    free(lin);
+    return sw;
+}
+
 static bool decode16(const VramMap *map, uint32_t teximage, uint32_t pltt, uint16_t *out, uint32_t stride) {
     uint32_t fmt = (teximage >> 26) & 7;
     uint32_t w = TEX_WIDTH(teximage), h = TEX_HEIGHT(teximage);
@@ -234,6 +260,9 @@ static const TexEntry *texture(const VramMap *map, uint32_t teximage, uint32_t p
     if (mirror & 2) {
         for (uint32_t y = 0; y < h; y++) memcpy(data + (2 * h - 1 - y) * sw, data + y * sw, sw * 2);
     }
+    // Swizzled (blocks of 16 bytes x 8 rows): the GE reads those much faster from main memory.
+    data = swizzle16(data, sw, sh);
+    if (!data) return NULL;
     sceKernelDcacheWritebackRange(data, sw * sh * 2);
     g_ge_stats[3] += (uint32_t) (sceKernelGetSystemTimeWide() - t_dec);
     TexEntry *t = &s_tex[s_tex_count++];
@@ -440,7 +469,7 @@ static void apply_state(const State *s, const State *prev, ScreenRect r, bool bl
     if (!prev || prev->tex != s->tex || prev->teximage != s->teximage) {
         if (s->tex) {
             sceGuEnable(GU_TEXTURE_2D);
-            sceGuTexMode(s->tex->psm, 0, 0, 0);
+            sceGuTexMode(s->tex->psm, 0, 0, 1); // swizzled
             sceGuTexImage(0, s->tex->w, s->tex->h, s->tex->w, s->tex->data);
             sceGuTexFlush();
             // Repeat (bits 16/17); mirrored repeat is in the doubled texture.

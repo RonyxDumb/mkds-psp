@@ -124,6 +124,9 @@ static void on_frame(const FrameSnapshot *f) {
                  (unsigned) (g_video_stats[2] / 1000), (unsigned) (g_video_stats[3] / 1000),
                  (unsigned) (g_psp_idle_ns / 1000000), f->scene);
         memset(g_video_stats, 0, sizeof(g_video_stats));
+        extern uint32_t g_ge_parts[3];
+        port_log("  GE parts of one picture: 2D under %u us, 3D %u us, 2D above %u us", (unsigned) g_ge_parts[0],
+                 (unsigned) g_ge_parts[1], (unsigned) g_ge_parts[2]);
         extern uint32_t g_ge_stats[8];
         port_log("  3D: %u cache flushes, %u textures decoded (%u Ktexels, %u ms), %u polygons, %u GE vertices, "
                  "%u batches (%u ms); CPU %d MHz, bus %d MHz",
