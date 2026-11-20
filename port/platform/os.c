@@ -75,8 +75,14 @@ u16 gTickInitialized;
 static uint64_t s_virtual_ns;
 static uint64_t os_time_ns(void) { return g_vblank_rate_mhz ? port_now_ns() - s_tick_origin_ns : s_virtual_ns; }
 
-static uint64_t ns_to_ticks(uint64_t ns) { return (uint64_t) ((double) ns * (TICK_HZ / 1e9)); }
-static uint64_t ticks_to_ns(uint64_t ticks) { return (uint64_t) ceil((double) ticks * (1e9 / TICK_HZ)) + 1; }
+// Integer arithmetic (the PSP has no FPU for doubles): ticks = ns * 33513982 / 64e9.
+#define TICK_NUM 33513982ull
+#define TICK_DEN 64000000000ull
+static uint64_t ns_to_ticks(uint64_t ns) { return ns / TICK_DEN * TICK_NUM + ns % TICK_DEN * TICK_NUM / TICK_DEN; }
+static uint64_t ticks_to_ns(uint64_t ticks) {
+    uint64_t r = ticks % TICK_NUM;
+    return ticks / TICK_NUM * TICK_DEN + (r * TICK_DEN + TICK_NUM - 1) / TICK_NUM + 1;
+}
 
 void OS_InitTick(void) {
     gTickInitialized = 1;
@@ -347,7 +353,13 @@ static bool run_deferred(void) {
 uint64_t g_frame_count;
 static uint64_t s_next_vblank_ns;
 
-static uint64_t vblank_period_ns(void) { return 1000000000000ull / (g_vblank_rate_mhz ? g_vblank_rate_mhz : 59826); } // ns per VBlank
+static uint64_t vblank_period_ns(void) { // ns per VBlank
+    static uint32_t rate;
+    static uint64_t period;
+    uint32_t r = g_vblank_rate_mhz ? g_vblank_rate_mhz : 59826;
+    if (r != rate) rate = r, period = 1000000000000ull / r;
+    return period;
+}
 
 static uint64_t s_last_vblank_ns;
 
@@ -358,6 +370,12 @@ int64_t port_os_vblank_phase_ns(void) { return (int64_t) (os_time_ns() - s_last_
 int64_t port_os_vblank_period_ns(void) { return (int64_t) vblank_period_ns(); }
 void port_os_shift_vblank(int64_t ns) {
     if (g_vblank_rate_mhz) s_next_vblank_ns += (uint64_t) ns;
+}
+
+// How late the current VBlank runs behind its due time (the PSP skips drawing frames when it falls behind).
+int64_t port_os_vblank_lateness_ns(void) {
+    if (!g_vblank_rate_mhz) return 0;
+    return (int64_t) (os_time_ns() - (s_next_vblank_ns - vblank_period_ns()));
 }
 
 void (*g_port_vblank_hook)(void); // tests (host/main.c)

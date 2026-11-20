@@ -22,12 +22,10 @@ static const uint32_t s_lcdc_addr[VRAM_BANK_COUNT] = {0x06800000, 0x06820000, 0x
 static uint8_t s_bank_store[VRAM_TOTAL_SIZE] __attribute__((aligned(64)));
 static uint32_t s_bank_view[VRAM_BANK_COUNT]; // DS address of the CPU view the bank is in, 0 = in its storage
 
+unsigned char g_ds_window[DS_WINDOW_SIZE] __attribute__((aligned(64)));
+
 bool port_mem_init(void) {
-    uint8_t *window = hapi_ds_window();
-    if (!window || (uintptr_t) window != (uintptr_t) PORT_DS_WINDOW) {
-        port_log("memory: the DS window is not at %08x", (unsigned) PORT_DS_WINDOW);
-        return false;
-    }
+    uint8_t *window = g_ds_window;
     memset(window, 0, DS_WINDOW_SIZE);
     memset(window + DSR_GBA_OFS, 0xff, DSR_GBA_HI - DSR_GBA_LO); // empty GBA slot (open bus)
     memset(s_bank_store, 0, sizeof(s_bank_store));
@@ -120,9 +118,17 @@ static void move_bank(int bank, uint8_t *to) {
 
 static bool overlaps(uint32_t a, uint32_t a_size, uint32_t b, uint32_t b_size) { return a < b + b_size && b < a + a_size; }
 
+uint32_t g_vram_generation;
+
 void port_vram_remap(int bank) {
     static const uint32_t cnt_offset[VRAM_BANK_COUNT] = {0x240, 0x241, 0x242, 0x243, 0x244, 0x245, 0x246, 0x248, 0x249};
-    uint32_t base = cpu_address(bank, IO8(cnt_offset[bank]));
+    static uint8_t last_cnt[VRAM_BANK_COUNT];
+    uint8_t cnt = IO8(cnt_offset[bank]);
+    if (cnt != last_cnt[bank]) {
+        last_cnt[bank] = cnt;
+        g_vram_generation++; // the GPU's texture cache starts again
+    }
+    uint32_t base = cpu_address(bank, cnt);
     uint32_t size = g_vram_bank_size[bank];
     uint8_t *view = base ? view_ptr(base, size) : NULL;
     if (!view) {

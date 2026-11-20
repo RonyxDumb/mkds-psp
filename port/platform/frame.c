@@ -19,8 +19,14 @@ void (*g_frame_hook)(const FrameSnapshot *snapshot);
 void *g_lockstep_ready, *g_lockstep_done;
 
 // Triple buffer: the writer fills `s_write`, publishes it as `s_ready`; the reader swaps `s_ready` with `s_read`.
+// The PSP draws each frame on the game thread (g_frame_hook) and has the memory for one snapshot only.
+#ifdef PSP
+static FrameSnapshot s_buffers[1];
+static int s_write = 0, s_read = 0;
+#else
 static FrameSnapshot s_buffers[3];
 static int s_write = 0, s_read = 2;
+#endif
 static _Atomic int s_ready = 1;
 static atomic_bool s_fresh;
 static uint64_t s_number;
@@ -32,14 +38,18 @@ static void capture(FrameSnapshot *f) {
     memcpy(f->io + 0x300, (const void *) (uintptr_t) (DS_IO_BASE + 0x300), 0x10); // POWCNT1
     memcpy(f->palette, (const void *) (uintptr_t) DS_PLTT_BASE, sizeof(f->palette));
     memcpy(f->oam, (const void *) (uintptr_t) DS_OAM_BASE, sizeof(f->oam));
+#ifndef PSP
     port_vram_gather(f->vram);
+#endif
     memcpy(f->vramcnt, (const void *) (uintptr_t) (DS_IO_BASE + 0x240), sizeof(f->vramcnt));
+#ifndef PSP
     const Gx3dFrame *g = gx3d_displayed();
     Gx3dFrame *d = &f->frame3d;
     memcpy(d->vertices, g->vertices, sizeof(GxVertex) * g->vertex_count);
     memcpy(d->polygons, g->polygons, sizeof(GxPolygon) * g->polygon_count);
     size_t header = offsetof(Gx3dFrame, vertex_count);
     memcpy((uint8_t *) d + header, (const uint8_t *) g + header, sizeof(Gx3dFrame) - header);
+#endif
     f->scene = (uint8_t) GetCurrentSceneNumber();
     f->time_ns = hapi_now_ns();
     f->number = ++s_number;
@@ -91,8 +101,10 @@ void port_frame_vblank(void) {
     if (g_frame_hook) {
         g_frame_hook(f);
     }
+#ifndef PSP
     s_write = atomic_exchange(&s_ready, s_write);
     atomic_store(&s_fresh, true);
+#endif
     if (g_lockstep_ready) {
         hapi_sem_post(g_lockstep_ready);
         hapi_sem_wait(g_lockstep_done);

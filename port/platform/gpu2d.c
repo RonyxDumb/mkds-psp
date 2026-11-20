@@ -19,7 +19,11 @@ static void map_pages(VramMap *m, int region, uint32_t region_offset, int bank, 
     for (uint32_t off = 0; off < size; off += PAGE) {
         uint32_t page = (region_offset + off) / PAGE;
         if (page < 48) {
+#ifdef PSP
+            m->page[region][page] = (int32_t) ((uintptr_t) port_vram_bank(bank) + off); // see SNAP_VRAM
+#else
             m->page[region][page] = (int32_t) (g_vram_bank_offset[bank] + off);
+#endif
         }
     }
 }
@@ -167,7 +171,7 @@ static inline void bg_span(const Engine *e, int bg, int *x0, int *x1) {
 }
 
 static uint16_t ext_palette_color(const Engine *e, int region, uint32_t slot_offset, uint32_t index) {
-    return rd16(e->map, e->f->vram, region, slot_offset + index * 2) & 0x7fff;
+    return rd16(e->map, SNAP_VRAM(e->f), region, slot_offset + index * 2) & 0x7fff;
 }
 
 // Text background.
@@ -199,19 +203,19 @@ static void draw_text_bg(const Engine *e, int bg, int y, uint16_t *out) {
         uint32_t sx = ((uint32_t) x + hofs) & (w - 1);
         uint32_t block = (sx >= 256 ? 1 : 0) + (sy >= 256 ? (w == 512 ? 2 : 1) : 0);
         uint32_t map_addr = screen_base + block * 0x800 + ((sy & 255) / 8) * 64 + ((sx & 255) / 8) * 2;
-        uint16_t entry = rd16(e->map, e->f->vram, e->bg_region, map_addr);
+        uint16_t entry = rd16(e->map, SNAP_VRAM(e->f), e->bg_region, map_addr);
         uint32_t tx = sx & 7, ty = sy & 7;
         if (entry & 0x400) tx = 7 - tx;
         if (entry & 0x800) ty = 7 - ty;
         uint32_t tile = entry & 0x3ff;
         uint16_t color;
         if (c256) {
-            uint8_t idx = rd8(e->map, e->f->vram, e->bg_region, char_base + tile * 64 + ty * 8 + tx);
+            uint8_t idx = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, char_base + tile * 64 + ty * 8 + tx);
             if (!idx) continue;
             color = ext ? ext_palette_color(e, e->bgext_region, ext_slot * 0x2000 + (entry >> 12) * 512, idx)
                         : e->pal[idx];
         } else {
-            uint8_t b = rd8(e->map, e->f->vram, e->bg_region, char_base + tile * 32 + ty * 4 + tx / 2);
+            uint8_t b = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, char_base + tile * 32 + ty * 4 + tx / 2);
             uint8_t idx = tx & 1 ? b >> 4 : b & 15;
             if (!idx) continue;
             color = e->pal[(entry >> 12) * 16 + idx];
@@ -264,24 +268,24 @@ static void draw_affine_bg(const Engine *e, int bg, int y, uint16_t *out, int ki
         }
         uint16_t color;
         if (kind == 0) {
-            uint8_t tile = rd8(e->map, e->f->vram, e->bg_region, screen_base + (sy / 8) * (w / 8) + sx / 8);
-            uint8_t idx = rd8(e->map, e->f->vram, e->bg_region, char_base + tile * 64 + (sy & 7) * 8 + (sx & 7));
+            uint8_t tile = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, screen_base + (sy / 8) * (w / 8) + sx / 8);
+            uint8_t idx = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, char_base + tile * 64 + (sy & 7) * 8 + (sx & 7));
             if (!idx) continue;
             color = e->pal[idx];
         } else if (kind == 1) {
-            uint16_t entry = rd16(e->map, e->f->vram, e->bg_region, screen_base + ((sy / 8) * (w / 8) + sx / 8) * 2);
+            uint16_t entry = rd16(e->map, SNAP_VRAM(e->f), e->bg_region, screen_base + ((sy / 8) * (w / 8) + sx / 8) * 2);
             uint32_t tx = sx & 7, ty = sy & 7;
             if (entry & 0x400) tx = 7 - tx;
             if (entry & 0x800) ty = 7 - ty;
-            uint8_t idx = rd8(e->map, e->f->vram, e->bg_region, char_base + (entry & 0x3ff) * 64 + ty * 8 + tx);
+            uint8_t idx = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, char_base + (entry & 0x3ff) * 64 + ty * 8 + tx);
             if (!idx) continue;
             color = ext ? ext_palette_color(e, e->bgext_region, bg * 0x2000 + (entry >> 12) * 512, idx) : e->pal[idx];
         } else if (kind == 2) {
-            uint8_t idx = rd8(e->map, e->f->vram, e->bg_region, bitmap_base + sy * w + sx);
+            uint8_t idx = rd8(e->map, SNAP_VRAM(e->f), e->bg_region, bitmap_base + sy * w + sx);
             if (!idx) continue;
             color = e->pal[idx];
         } else {
-            uint16_t c = rd16(e->map, e->f->vram, e->bg_region, bitmap_base + (sy * w + sx) * 2);
+            uint16_t c = rd16(e->map, SNAP_VRAM(e->f), e->bg_region, bitmap_base + (sy * w + sx) * 2);
             if (!(c & 0x8000)) continue;
             color = c;
         }
@@ -424,7 +428,7 @@ static void draw_objs(const Engine *e, int y, Line *line) {
                     uint32_t mask = width / 8 - 1;
                     addr = (((tile / (width / 8)) * 8 + ty) * width + (tile & mask) * 8 + tx) * 2;
                 }
-                uint16_t c = rd16(e->map, e->f->vram, e->obj_region, addr);
+                uint16_t c = rd16(e->map, SNAP_VRAM(e->f), e->obj_region, addr);
                 if (!(c & 0x8000)) continue;
                 color = c;
                 alpha = (uint8_t) (a2 >> 12);
@@ -435,13 +439,13 @@ static void draw_objs(const Engine *e, int y, Line *line) {
                     uint32_t cell = map1d ? (ty / 8) * (w / 8) + tx / 8 : (ty / 8) * 16 + tx / 8;
                     addr = map1d ? tbase + cell * 64 : tile * 32 + ((ty / 8) * 32 * 32) + (tx / 8) * 64;
                     addr += (ty & 7) * 8 + (tx & 7);
-                    uint8_t idx = rd8(e->map, e->f->vram, e->obj_region, addr);
+                    uint8_t idx = rd8(e->map, SNAP_VRAM(e->f), e->obj_region, addr);
                     if (!idx) continue;
                     color = ext ? ext_palette_color(e, e->objext_region, (a2 >> 12) * 512, idx) : e->pal[256 + idx];
                 } else {
                     uint32_t cell = map1d ? (ty / 8) * (w / 8) + tx / 8 : (ty / 8) * 32 + tx / 8;
                     addr = (map1d ? tile * bound : tile * 32) + cell * 32 + (ty & 7) * 4 + (tx & 7) / 2;
-                    uint8_t b = rd8(e->map, e->f->vram, e->obj_region, addr);
+                    uint8_t b = rd8(e->map, SNAP_VRAM(e->f), e->obj_region, addr);
                     uint8_t idx = tx & 1 ? b >> 4 : b & 15;
                     if (!idx) continue;
                     color = e->pal[256 + (a2 >> 12) * 16 + idx];
@@ -800,7 +804,7 @@ static void render_engine(const FrameSnapshot *f, const VramMap *map, bool is_a,
             for (int x = 0; x < width; x++) {
                 int dx = x - margin;
                 line[x] = dx < 0 || dx > 255 ? 0xff000000u
-                                             : rgb555_to_888(rd16(map, f->vram, VR_LCDC,
+                                             : rgb555_to_888(rd16(map, SNAP_VRAM(f), VR_LCDC,
                                                                   bank * 0x20000 + (y * 256 + dx) * 2));
             }
         } else if (display == 3) {
@@ -861,7 +865,11 @@ void gpu2d_capture(const FrameSnapshot *f, const uint32_t *engineA, const uint32
     uint32_t dispcnt = (uint32_t) f->io[0] | f->io[1] << 8 | f->io[2] << 16 | (uint32_t) f->io[3] << 24;
     uint32_t read_bank = (dispcnt >> 18) & 3, read_ofs = ((cnt >> 26) & 3) * 0x8000;
     uint8_t *dst = port_vram_bank(bank);
+#ifdef PSP
+    const uint8_t *srcb = port_vram_bank(read_bank);
+#else
     const uint8_t *srcb = f->vram + g_vram_bank_offset[read_bank];
+#endif
     for (uint32_t y = 0; y < h; y++) {
         for (uint32_t x = 0; x < w; x++) {
             uint32_t a_rgba = src_3d ? (layer3d ? layer3d[y * 256 + x] : 0) : engineA[y * 256 + x];

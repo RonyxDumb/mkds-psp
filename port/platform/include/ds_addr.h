@@ -2,17 +2,17 @@
 //
 // The game reads and writes main RAM, the shared area, the I/O registers, palettes, VRAM and OAM by absolute
 // address. On the PSP (no MMU) those addresses cannot be reserved, so every DS region lives in one block of memory,
-// the "DS window", at a fixed address chosen by the build (PORT_DS_WINDOW). DSA(ds_address) gives the address of a DS
-// location in the window. It is a constant expression: tools/portify.py rewrites the DS addresses of the game's
-// sources into DSA(...), and the platform layer uses it for the registers it reads and writes.
+// the "DS window" (g_ds_window, a static array of the program). DSA(ds_address) gives the address of a DS location in
+// the window. For a constant argument it is an address constant (usable in static initialisers): tools/portify.py
+// rewrites the DS addresses of the game's sources into DSA(...), and the platform layer uses it for the registers it
+// reads and writes.
 //
 // Inside one region the mapping is linear, so the game's address arithmetic (base + offset) keeps working.
 // Addresses outside every region are left unchanged, so that a missed access faults instead of corrupting memory.
 #pragma once
 
-#ifndef PORT_DS_WINDOW
-#error "PORT_DS_WINDOW must be defined by the build"
-#endif
+extern unsigned char g_ds_window[];
+#define PORT_DS_WINDOW ((unsigned long) g_ds_window)
 
 // Region table: DS start, DS end (exclusive), offset in the window.
 #define DSR_MAIN_LO 0x02000000u // main RAM (4 MiB, as on the DS)

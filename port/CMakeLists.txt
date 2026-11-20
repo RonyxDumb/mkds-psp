@@ -11,13 +11,6 @@ set(DECOMP ${REPO}/decomp)
 set(GEN ${CMAKE_CURRENT_BINARY_DIR}/gen)
 set(DECOMP_VERSION eur)
 
-if (PSP)
-    # The DS window lies at a fixed address in the program image (psp/ds_window.ld).
-    set(DS_WINDOW 0x08a00000)
-else()
-    set(DS_WINDOW 0x30000000)
-endif()
-
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # ------------------------------------------------------------------ decomp sources, prepared for the port
@@ -45,7 +38,7 @@ target_include_directories(game PRIVATE
     ${GEN}/msl_include
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/include
     )
-target_compile_definitions(game PRIVATE version_EUR PORT_DS_WINDOW=${DS_WINDOW})
+target_compile_definitions(game PRIVATE version_EUR)
 target_compile_options(game PRIVATE
     -std=gnu11
     -include ${CMAKE_CURRENT_SOURCE_DIR}/compat/port_prefix.h
@@ -74,7 +67,7 @@ set(PLATFORM_SOURCES ${PLATFORM_SOURCES} ${P}/hostside/memory.c ${P}/hostside/di
 
 function(port_target T)
     target_include_directories(${T} PRIVATE ${GEN}/include ${P}/include ${P} ${CMAKE_CURRENT_SOURCE_DIR}/psp)
-    target_compile_definitions(${T} PRIVATE version_EUR PORT_DS_WINDOW=${DS_WINDOW})
+    target_compile_definitions(${T} PRIVATE version_EUR)
     target_compile_options(${T} PRIVATE ${OPT} -fno-strict-aliasing -fwrapv -Wall -Wno-unused-function
         $<$<COMPILE_LANGUAGE:C>:-std=gnu11>)
 endfunction()
@@ -85,8 +78,6 @@ if (PSP)
     port_target(mkds)
     target_link_libraries(mkds PRIVATE -Wl,--whole-archive game -Wl,--no-whole-archive
         pspgu pspgum pspdisplay pspge pspctrl pspaudio psppower psprtc pspdebug m)
-    target_link_options(mkds PRIVATE -T${CMAKE_CURRENT_SOURCE_DIR}/psp/mkds.ld)
-    set_target_properties(mkds PROPERTIES LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/psp/mkds.ld)
     create_pbp_file(TARGET mkds
         ICON_PATH NULL
         BACKGROUND_PATH NULL

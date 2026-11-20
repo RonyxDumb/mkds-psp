@@ -48,6 +48,9 @@ extern const uint32_t g_vram_bank_size[VRAM_BANK_COUNT];
 #define VRAM_TOTAL_SIZE 0xa4000u
 // Re-applies the CPU mapping of bank `bank` after its VRAMCNT register changed.
 void port_vram_remap(int bank);
+// Changes whenever a VRAMCNT register changes: texture memory can only be written while its bank is mapped for the
+// CPU, so texture caches stay valid as long as this does not move.
+extern uint32_t g_vram_generation;
 // Copies the banks, in bank order (g_vram_bank_offset), into dst (VRAM_TOTAL_SIZE bytes).
 void port_vram_gather(uint8_t *dst);
 

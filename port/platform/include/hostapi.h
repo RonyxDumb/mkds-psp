@@ -39,9 +39,6 @@ __attribute__((noreturn)) void hapi_thread_exit(void);
 void *hapi_tls_get(void);
 void hapi_tls_set(void *value);
 
-// The DS window (include/ds_addr.h): DS_WINDOW_SIZE bytes at PORT_DS_WINDOW.
-uint8_t *hapi_ds_window(void);
-
 // The ROM (read on demand: it does not fit in the PSP's memory) and the save file.
 uint32_t hapi_rom_size(void);
 void hapi_rom_read(uint32_t offset, void *dst, uint32_t size);

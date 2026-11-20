@@ -64,6 +64,7 @@ static struct {
     uint32_t prim_index;   // polygons begun in the current vertex block
     int32_t proj_aspect;   // of the projection matrix
     bool proj_aspect_dirty;
+    bool proj_list_dirty; // the projection changed since the last one recorded in the list
 } G;
 
 // ------------------------------------------------------------------------------------------------ matrix helpers
@@ -108,7 +109,7 @@ static void update_result_registers(void);
 
 static void apply_load(const Mtx *n) {
     switch (G.mode) {
-    case 0: G.proj = *n; G.proj_aspect_dirty = true; break;
+    case 0: G.proj = *n; G.proj_aspect_dirty = true; G.proj_list_dirty = true; break;
     case 1: G.pos = *n; break;
     case 2: G.pos = *n; G.vec = *n; break;
     case 3: G.tex = *n; break;
@@ -119,7 +120,7 @@ static void apply_load(const Mtx *n) {
 // Current = N * Current. Mode 2 multiplies the direction matrix too (except for SCALE).
 static void apply_mult(const Mtx *n, bool scale) {
     switch (G.mode) {
-    case 0: mtx_mul(&G.proj, n, &G.proj); G.proj_aspect_dirty = true; break;
+    case 0: mtx_mul(&G.proj, n, &G.proj); G.proj_aspect_dirty = true; G.proj_list_dirty = true; break;
     case 1: mtx_mul(&G.pos, n, &G.pos); break;
     case 2:
         mtx_mul(&G.pos, n, &G.pos);
@@ -196,9 +197,10 @@ static Gx3dFrame *building(void) { return &G.frames[G.building]; }
 
 static int32_t det3(int64_t a0, int64_t a1, int64_t a2, int64_t b0, int64_t b1, int64_t b2, int64_t c0, int64_t c1,
                     int64_t c2) {
-    // Sign of the determinant, computed in floating point to avoid overflow of 20.12 products.
-    double d = (double) a0 * ((double) b1 * c2 - (double) b2 * c1) - (double) a1 * ((double) b0 * c2 - (double) b2 * c0) +
-               (double) a2 * ((double) b0 * c1 - (double) b1 * c0);
+    // Sign of the determinant, computed in floating point to avoid overflow of 20.12 products (single precision:
+    // the PSP has no FPU for doubles; only nearly degenerate polygons can come out the other way).
+    float d = (float) a0 * ((float) b1 * c2 - (float) b2 * c1) - (float) a1 * ((float) b0 * c2 - (float) b2 * c0) +
+              (float) a2 * ((float) b0 * c1 - (float) b1 * c0);
     return d > 0 ? 1 : d < 0 ? -1 : 0;
 }
 
@@ -257,6 +259,13 @@ static void emit_polygon(const GxVertex *v, int count) {
         if (G.proj_aspect < 0x800 || G.proj_aspect > 0x4000) G.proj_aspect = 0x1555; // not a screen projection
     }
     p->aspect = G.proj_aspect;
+    if (G.proj_list_dirty || f->proj_count == 0) {
+        G.proj_list_dirty = false;
+        if (f->proj_count < GX_MAX_PROJS) {
+            memcpy(f->projs[f->proj_count++], G.proj.m, sizeof(G.proj.m));
+        }
+    }
+    p->proj = (uint8_t) (f->proj_count - 1);
     if (!f->proj_aspect) f->proj_aspect = G.proj_aspect;
     memcpy(&f->vertices[f->vertex_count], v, sizeof(GxVertex) * count);
     f->vertex_count += count;
@@ -427,7 +436,7 @@ static void execute(uint32_t cmd) {
     case 0x12: { // POP
         if (G.mode == 0) {
             G.proj = G.proj_stack[0];
-            G.proj_aspect_dirty = true;
+            G.proj_aspect_dirty = true; G.proj_list_dirty = true;
             G.proj_sp = 0;
         } else if (G.mode == 3) {
             G.tex = G.tex_stack[0];
@@ -457,7 +466,7 @@ static void execute(uint32_t cmd) {
     case 0x14: // RESTORE
         if (G.mode == 0) {
             G.proj = G.proj_stack[0];
-            G.proj_aspect_dirty = true;
+            G.proj_aspect_dirty = true; G.proj_list_dirty = true;
         } else if (G.mode == 3) {
             G.tex = G.tex_stack[0];
         } else {
@@ -693,7 +702,7 @@ void gx3d_command(uint32_t cmd, uint32_t param) { feed(cmd, param); }
 void gx3d_init(void) {
     memset(&G, 0, sizeof(G));
     mtx_identity(&G.proj);
-    G.proj_aspect_dirty = true;
+    G.proj_aspect_dirty = true; G.proj_list_dirty = true;
     mtx_identity(&G.pos);
     mtx_identity(&G.vec);
     mtx_identity(&G.tex);
@@ -730,6 +739,7 @@ void gx3d_discard(void) {
     }
     Gx3dFrame *f = building();
     f->polygon_count = 0;
+    f->proj_count = 0;
     f->proj_aspect = 0;
     f->vertex_count = 0;
     G.draw_tag = 0;
@@ -751,6 +761,7 @@ void gx3d_vblank(void) {
     G.building ^= 1;
     Gx3dFrame *next = building();
     next->polygon_count = 0;
+    next->proj_count = 0;
     next->proj_aspect = 0;
     next->vertex_count = 0;
     G.draw_tag = 0;

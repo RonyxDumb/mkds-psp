@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 void host_write_frame(const FrameSnapshot *f, const char *path); // host/render.c
+void fast2d_check(const FrameSnapshot *f, uint64_t n);            // host/render.c
 
 typedef struct Press {
     uint64_t frame, length;
@@ -80,6 +81,14 @@ static bool on_frame(const FrameSnapshot *f, uint64_t n) {
                  b[0x13], *(const uint32_t *) (b + 0x14), *(const uint32_t *) (b + 0x16), b[0x18],
                  *(const uint32_t *) (b + 0x1c));
     }
+    if (getenv("MKDS_FXLOG") && n % 50 == 0) { // tests: which 2D features each engine uses
+        for (int eng = 0; eng < 2; eng++) {
+            const uint16_t *io = (const uint16_t *) (f->io + eng * 0x1000);
+            port_log("fx %llu scene %d eng %c dispcnt %08x bgcnt %04x %04x %04x %04x bldcnt %04x alpha %04x y %02x mb %04x",
+                     (unsigned long long) n, f->scene, 'A' + eng, io[0] | (uint32_t) io[1] << 16, io[4], io[5], io[6],
+                     io[7], io[0x28], io[0x29], io[0x2a], io[0x36]);
+        }
+    }
     if (s_bglog) {
         const uint16_t *io = (const uint16_t *) f->io;
         port_log("win %04x %04x %04x %04x in %04x out %04x", io[0x20], io[0x21], io[0x22], io[0x23], io[0x24], io[0x25]);
@@ -109,6 +118,7 @@ static bool on_frame(const FrameSnapshot *f, uint64_t n) {
         fwrite(audio, 4, (size_t) samples, s_wav);
         s_wav_frames += (uint32_t) samples;
     }
+    if (getenv("MKDS_F2CHECK") && n % (uint64_t) atoi(getenv("MKDS_F2CHECK")) == 0) fast2d_check(f, n);
     if (s_dump_every && n % s_dump_every == 0 && (!getenv("MKDS_DUMP_FROM") || n >= (uint64_t) atoi(getenv("MKDS_DUMP_FROM")))) {
         char path[512];
         snprintf(path, sizeof(path), "%s/frame_%05llu.png", s_out, (unsigned long long) n);

@@ -2,10 +2,13 @@
 // threads are ordinary threads and any memory is addressable by it.
 #include "port.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 
 void *host_low_alloc(size_t size) { return calloc(1, size); }
+void host_start_guest_thread(void (*fn)(void *), void *arg);
+
+#ifndef PSP // psp/hostapi_psp.c starts the threads there
+#include <pthread.h>
 
 typedef struct Start {
     void (*fn)(void *);
@@ -33,6 +36,7 @@ void host_start_guest_thread(void (*fn)(void *), void *arg) {
     }
     pthread_attr_destroy(&attr);
 }
+#endif
 
 // ------------------------------------------------------------------------------------------------ guest interface
 #include "guest_if.h"

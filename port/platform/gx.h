@@ -9,8 +9,13 @@
 extern "C" {
 #endif
 
+#ifdef PSP // the DS draws at most 2048 polygons and 6144 vertices
+#define GX_MAX_POLYGONS 4096 // culled ones included (see GxPolygon.hidden)
+#define GX_MAX_VERTICES 12288
+#else
 #define GX_MAX_POLYGONS 8192 // culled ones included (see GxPolygon.hidden)
 #define GX_MAX_VERTICES 32768
+#endif
 
 typedef struct GxVertex {
     int32_t x, y, z, w; // clip space, 20.12 fixed point (before the viewport transform)
@@ -32,7 +37,10 @@ typedef struct GxPolygon {
     uint32_t tag;        // place in its vertex block (BEGIN_VTXS), counting culled ones: identity for interpolation
     int32_t aspect;      // aspect ratio of its projection (20.12): 4:3 views keep their shape on a wide screen
     uint32_t obj;        // what the game was drawing (g_port_draw_id): identity of the object for interpolation
+    uint8_t proj;        // the projection matrix it was drawn with (Gx3dFrame.projs)
 } GxPolygon;
+
+#define GX_MAX_PROJS 32
 
 typedef struct Gx3dFrame {
     GxVertex vertices[GX_MAX_VERTICES];
@@ -51,6 +59,10 @@ typedef struct Gx3dFrame {
     uint16_t toon_table[32];
     uint8_t alpha_ref;
     int32_t proj_aspect; // aspect ratio of the projection of the first polygon, 20.12 (0: none)
+    // The projection matrices of the list (row vectors, 20.12): a renderer that projects itself (the PSP's GE) takes
+    // the clip-space vertices back to view space with their inverse.
+    int32_t projs[GX_MAX_PROJS][16];
+    uint32_t proj_count;
     uint64_t serial; // increases with every list
 } Gx3dFrame;
 

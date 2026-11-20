@@ -182,7 +182,7 @@ void soft3d_render(const Gx3dFrame *frame, const FrameSnapshot *f, uint32_t *out
             bool fmt_alpha = ((p->teximage >> 26) & 7) == 1 || ((p->teximage >> 26) & 7) == 6;
             bool translucent = (alpha != 0 && alpha != 31) || fmt_alpha;
             if (translucent != (pass == 1)) continue;
-            const uint32_t *tex = texturing ? texture(&map, f->vram, p->teximage, p->pltt) : NULL;
+            const uint32_t *tex = texturing ? texture(&map, SNAP_VRAM(f), p->teximage, p->pltt) : NULL;
             V v[4], clipped[8];
             for (int k = 0; k < p->count; k++) {
                 const GxVertex *gv = &frame->vertices[p->first + k];

@@ -173,3 +173,57 @@ void host_write_frame(const FrameSnapshot *f, const char *path) {
     memcpy(out + 256 * 192, screens[1], sizeof(screens[1]));
     write_png(path, out, 256, 384);
 }
+
+// Tests: the fast 2D renderer (platform/fast2d.c) against the complete one, pixel by pixel (BGR555, no 3D layer, no
+// master brightness).
+#include "fast2d.h"
+void fast2d_check(const FrameSnapshot *f, uint64_t n) {
+    static uint32_t ref[2][256 * 192];
+    static uint16_t fast[256 * 192];
+    FrameSnapshot *g = (FrameSnapshot *) f;
+    uint16_t mb[2] = {*(uint16_t *) (g->io + 0x6c), *(uint16_t *) (g->io + 0x106c)};
+    *(uint16_t *) (g->io + 0x6c) = *(uint16_t *) (g->io + 0x106c) = 0;
+    gpu2d_render(f, NULL, ref[0], ref[1], 0);
+    bool a_top = gpu2d_engine_a_on_top(f);
+    for (int eng = 0; eng < 2; eng++) {
+        Fast2dEngineOut o = {fast, NULL, false, 0};
+        if (!fast2d_render_engine(f, eng == 0, &o)) {
+            port_log("f2check %llu engine %c: not supported", (unsigned long long) n, 'A' + eng);
+            continue;
+        }
+        const uint32_t *r = ref[(eng == 0) == a_top ? 0 : 1];
+        int bad = 0, first = -1;
+        for (int i = 0; i < 256 * 192; i++) {
+            uint32_t c = r[i];
+            uint16_t c555 = (uint16_t) (((c >> 3) & 31) | ((c >> 11) & 31) << 5 | ((c >> 19) & 31) << 10);
+            int d = 0; // per channel, rounding differences of blends ignored
+            for (int k = 0; k < 15; k += 5) {
+                int u = (fast[i] >> k) & 31, v = (c555 >> k) & 31;
+                if (u - v > d) d = u - v;
+                if (v - u > d) d = v - u;
+            }
+            if (d > 1) {
+                if (first < 0) first = i;
+                bad++;
+            }
+        }
+        port_log("f2check %llu scene %d engine %c: %d pixels differ%s", (unsigned long long) n, f->scene, 'A' + eng, bad,
+                 bad ? "" : " (ok)");
+        if (bad) {
+            port_log("  first at %d,%d: fast %04x ref %06x", first % 256, first / 256, fast[first], r[first] & 0xffffff);
+            if (getenv("MKDS_F2DUMP")) {
+                static uint32_t img[256 * 384];
+                for (int i = 0; i < 256 * 192; i++) {
+                    uint16_t c = fast[i];
+                    img[i] = r[i];
+                    img[256 * 192 + i] = ((c & 31) << 3) | (((c >> 5) & 31) << 11) | (((c >> 10) & 31) << 19);
+                }
+                char path[256];
+                snprintf(path, sizeof(path), "%s/f2_%05llu_%c.png", getenv("MKDS_F2DUMP"), (unsigned long long) n, 'A' + eng);
+                write_png(path, img, 256, 384);
+            }
+        }
+    }
+    *(uint16_t *) (g->io + 0x6c) = mb[0];
+    *(uint16_t *) (g->io + 0x106c) = mb[1];
+}

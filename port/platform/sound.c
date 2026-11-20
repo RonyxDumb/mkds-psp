@@ -47,7 +47,7 @@ static void snd_lock(void) {
 }
 static SNDSharedWork *s_shared;
 static int s_output_rate = 48000;
-static double s_frame_accum;
+static int64_t s_frame_accum; // samples left in the driver frame, 32.32 fixed point (no double: the PSP has no FPU for it)
 static int s_master_volume = 127;
 
 // ------------------------------------------------------------------------------------------------ tables
@@ -98,7 +98,7 @@ typedef struct Channel {
     int format; // 0 PCM8, 1 PCM16, 2 ADPCM
     bool loop;
     uint32_t loop_start, loop_len; // in samples
-    double pos;                     // in samples
+    uint64_t pos;                   // in samples, 32.32 fixed point
     int duty;
     uint16_t lfsr;
     // ADPCM
@@ -128,7 +128,7 @@ typedef struct Channel {
     uint16_t direct_timer;
     // mix output
     float gain_l, gain_r;
-    double step;
+    uint64_t step; // 32.32
 } Channel;
 
 typedef struct Track {
@@ -227,11 +227,41 @@ static void channel_stop(Channel *c) {
 
 // Timers are periods in ARM7 clocks / 2 (the SDK's convention; the register takes 0x10000 minus it). A pitch in 1/64
 // semitone shortens the period by 2^(pitch / 768).
-static double rate_for(uint16_t period, int pitch) {
-    double t = period * pow(2.0, -pitch / 768.0);
-    if (t < 16) t = 16;
-    return 16756991.0 / t;
+// 2^(-pitch / 768) and 10^(db / 200) from tables: the C library's powf works in double precision, which the PSP
+// computes in software.
+static float s_pitch_table[768]; // 2^(-i / 768)
+static float s_db_table[200];    // 10^(-i / 200)
+static void tables_init(void) {
+    if (s_pitch_table[0] != 0) return;
+    for (int i = 0; i < 768; i++) s_pitch_table[i] = (float) pow(2.0, -i / 768.0);
+    for (int i = 0; i < 200; i++) s_db_table[i] = (float) pow(10.0, -i / 200.0);
 }
+static float pitch_factor(int pitch) { // 2^(-pitch / 768)
+    tables_init();
+    int q = pitch >= 0 ? pitch / 768 : -((-pitch + 767) / 768);
+    int r = pitch - q * 768;
+    float f = s_pitch_table[r];
+    for (; q > 0; q--) f *= 0.5f;
+    for (; q < 0; q++) f *= 2.0f;
+    return f;
+}
+static float db_gain(int db) { // 10^(db / 200), db <= 0 mostly
+    tables_init();
+    if (db >= 0) return 1.0f;
+    int q = (-db) / 200, r = (-db) % 200;
+    if (q > 30) return 0;
+    float g = s_db_table[r];
+    for (; q > 0; q--) g *= 0.1f;
+    return g;
+}
+
+static float rate_for(uint16_t period, int pitch) {
+    float t = period * pitch_factor(pitch);
+    if (t < 16) t = 16;
+    return 16756991.0f / t;
+}
+
+static uint64_t step_for(float rate, int output_rate) { return (uint64_t) (uint32_t) (rate / output_rate * 65536.0f) << 16; }
 
 static const int8_t s_ima_index[8] = {-1, -1, -1, -1, 2, 4, 6, 8};
 static const int16_t s_ima_step[89] = {
@@ -267,7 +297,7 @@ static int adpcm_next(Channel *c) {
 // Reads the sample at the current position (advancing the ADPCM decoder as needed). Returns false at the end.
 static bool channel_sample(Channel *c, int *out) {
     if (c->type == CH_PSG) {
-        int phase = (int) c->pos & 7; // one duty step per timer period, 8 per cycle
+        int phase = (int) (c->pos >> 32) & 7; // one duty step per timer period, 8 per cycle
         *out = phase < c->duty + 1 ? 0x7fff : -0x7fff;
         return true;
     }
@@ -275,12 +305,12 @@ static bool channel_sample(Channel *c, int *out) {
         *out = c->lfsr & 1 ? -0x7fff : 0x7fff;
         return true;
     }
-    uint32_t i = (uint32_t) c->pos;
+    uint32_t i = (uint32_t) (c->pos >> 32);
     uint32_t end = c->loop_start + c->loop_len;
     if (i >= end) {
         if (!c->loop || c->loop_len == 0) return false;
         uint32_t over = (i - c->loop_start) % c->loop_len;
-        c->pos = c->loop_start + over + (c->pos - (double) i);
+        c->pos = ((uint64_t) (c->loop_start + over) << 32) | (uint32_t) c->pos;
         i = c->loop_start + over;
         if (c->format == 2) {
             c->adpcm_sample = c->loop_sample;
@@ -774,8 +804,8 @@ static void update_channel_params(Channel *c) {
         float pan = (float) c->direct_pan;
         c->gain_l = vol * (128 - pan) / 128.0f;
         c->gain_r = vol * pan / 128.0f;
-        double rate = c->direct_timer ? 16756991.0 / c->direct_timer : 0;
-        c->step = rate / s_output_rate;
+        float rate = c->direct_timer ? 16756991.0f / c->direct_timer : 0;
+        c->step = step_for(rate, s_output_rate);
         return;
     }
     // Envelope.
@@ -855,7 +885,7 @@ static void update_channel_params(Channel *c) {
     if (db < -723) db = -723;
     if (db > 0) db = 0;
     c->last_db = db;
-    float gain = powf(10.0f, db / 200.0f) * (s_master_volume / 127.0f);
+    float gain = db_gain(db) * (s_master_volume / 127.0f);
     if (pan < -64) pan = -64;
     if (pan > 63) pan = 63;
     // The mixer pans linearly: left (128 - pan) / 128, right pan / 128, pan 0..127.
@@ -869,7 +899,7 @@ static void update_channel_params(Channel *c) {
     }
     c->gain_l = gain * (128 - p) / 128.0f;
     c->gain_r = gain * p / 128.0f;
-    double rate = rate_for(c->base_timer, pitch);
+    float rate = rate_for(c->base_timer, pitch);
     if (g_snd_chlog && c->chlog_frame != g_frame_count) {
         c->chlog_frame = g_frame_count;
         double period = c->base_timer * pow(2.0, -pitch / 768.0);
@@ -884,7 +914,7 @@ static void update_channel_params(Channel *c) {
                  (unsigned) (uintptr_t) (c->data ? c->data : 0), (unsigned) (0x10000 - (int) period), db,
                  pan + 64, t ? t->player : -1);
     }
-    c->step = rate / s_output_rate;
+    c->step = step_for(rate, s_output_rate);
 }
 
 static void driver_frame(void) {
@@ -958,13 +988,13 @@ static void output_effect(float *l, float *r, int rate) {
 void port_snd_render(int16_t *out, int frames, int rate) {
     snd_lock();
     s_output_rate = rate;
-    double frame_samples = FRAME_SECONDS * rate;
+    int64_t frame_samples = (int64_t) (FRAME_SECONDS * 65536.0 * rate) << 16;
     for (int n = 0; n < frames; n++) {
         if (s_frame_accum <= 0) {
             driver_frame();
             s_frame_accum += frame_samples;
         }
-        s_frame_accum -= 1;
+        s_frame_accum -= (int64_t) 1 << 32;
         float l = 0, r = 0;
         for (int i = 0; i < CHANNELS; i++) {
             Channel *c = &s_ch[i];
@@ -976,10 +1006,10 @@ void port_snd_render(int16_t *out, int frames, int rate) {
             }
             l += s * c->gain_l;
             r += s * c->gain_r;
-            double before = c->pos;
+            uint32_t before = (uint32_t) (c->pos >> 32);
             c->pos += c->step;
             if (c->type == CH_NOISE) {
-                for (int k = (int) before; k < (int) c->pos; k++) {
+                for (uint32_t k = before; k < (uint32_t) (c->pos >> 32); k++) {
                     int bit = c->lfsr & 1;
                     c->lfsr >>= 1;
                     if (bit) c->lfsr ^= 0x6000;

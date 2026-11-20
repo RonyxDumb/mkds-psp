@@ -103,11 +103,6 @@ void hapi_thread_exit(void) {
     pthread_exit(NULL);
 }
 
-uint8_t *hapi_ds_window(void) {
-    void *p = mmap((void *) (uintptr_t) PORT_DS_WINDOW, DS_WINDOW_SIZE, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-    return p == MAP_FAILED ? NULL : p;
-}
 
 // ------------------------------------------------------------------------------------------------ ROM and save
 static const uint8_t *s_rom;
