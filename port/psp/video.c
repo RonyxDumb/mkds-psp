@@ -138,6 +138,7 @@ static void draw_brightness(uint16_t reg, ScreenRect r) {
 static uint16_t *s_engine[2];  // fast2d outputs, BGR555 | 0x8000 (GU_PSM_5551)
 static uint32_t *s_above;      // engine A above the 3D layer
 static int s_frame_parity;
+uint64_t g_video_stats[4]; // us: engine A, engine B, 3D lists, waiting for the GE
 
 void video_present(const FrameSnapshot *f) {
     if (s_debug_screen) return;
@@ -147,8 +148,29 @@ void video_present(const FrameSnapshot *f) {
     }
     s_frame_parity ^= 1;
     Fast2dEngineOut out[2] = {{s_engine[0], s_above, false, 0}, {s_engine[1], NULL, false, 0}};
-    bool fast = fast2d_render_engine(f, true, &out[0]) && fast2d_render_engine(f, false, &out[1]);
+    s_shown_layout = current_layout(f);
+    ScreenRect top, bottom;
+    layout_rects(s_shown_layout, &top, &bottom);
     bool a_top = gpu2d_engine_a_on_top(f);
+    // The screen shown small (the race map) is drawn every other frame.
+    ScreenRect rect_b = a_top ? bottom : top, rect_a = a_top ? top : bottom;
+    static bool s_b_valid;
+    static Fast2dEngineOut s_b_last;
+    bool skip_b = s_b_valid && rect_b.w < rect_a.w && s_frame_parity;
+    uint64_t t0 = sceKernelGetSystemTimeWide();
+    bool fast = fast2d_render_engine(f, true, &out[0]);
+    uint64_t t1 = sceKernelGetSystemTimeWide();
+    if (fast && skip_b) {
+        out[1] = s_b_last;
+    } else if (fast) {
+        fast = fast2d_render_engine(f, false, &out[1]);
+        s_b_last = out[1];
+        s_b_valid = fast;
+    }
+    if (!fast) s_b_valid = false;
+    uint64_t t2 = sceKernelGetSystemTimeWide();
+    g_video_stats[0] += t1 - t0;
+    g_video_stats[1] += t2 - t1;
     bool layer3d = false;
     if (!fast) {
         // The complete renderer, 3D included.
@@ -165,10 +187,6 @@ void video_present(const FrameSnapshot *f) {
         }
     }
 
-    s_shown_layout = current_layout(f);
-    ScreenRect top, bottom;
-    layout_rects(s_shown_layout, &top, &bottom);
-
     sceGuStart(GU_DIRECT, s_list);
     sceGuClearColor(0xff000000);
     sceGuClear(GU_COLOR_BUFFER_BIT);
@@ -184,7 +202,9 @@ void video_present(const FrameSnapshot *f) {
             if (eng == 0 && out[0].split) {
                 sceGuEnable(GU_BLEND);
                 sceGuDisable(GU_BLEND);
+                uint64_t t3 = sceKernelGetSystemTimeWide();
                 if (layer3d) ge3d_draw(SNAP_3D(f), f, r);
+                g_video_stats[2] += sceKernelGetSystemTimeWide() - t3;
                 sceGuEnable(GU_BLEND);
                 draw_texture(s_above, GU_PSM_8888, r);
                 sceGuDisable(GU_BLEND);
@@ -194,7 +214,9 @@ void video_present(const FrameSnapshot *f) {
     }
     input_draw_pointer();
     sceGuFinish();
+    uint64_t t4 = sceKernelGetSystemTimeWide();
     sceGuSync(0, 0);
+    g_video_stats[3] += sceKernelGetSystemTimeWide() - t4;
     sceGuSwapBuffers();
 }
 

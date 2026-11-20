@@ -47,6 +47,7 @@ typedef struct F2 {
     uint8_t oa[256];  // 0xff normal, 0xfe semi-transparent, 0..15 bitmap alpha
     uint8_t ow[256];  // inside the OBJ window
     bool obj_window;  // some sprite draws the OBJ window
+    bool line_semi;   // a semi-transparent or bitmap sprite pixel on the line
     // Windows: what each pixel of the line shows (bits 0..3 BG, 4 OBJ, 5 colour effects).
     bool masked;
     uint8_t mask[256];
@@ -172,6 +173,82 @@ static void bg_affine(F2 *e, int bg, int y, int kind) {
     const uint16_t *ext = kind == 1 && (e->dispcnt & 0x40000000) ? e->bgext[bg] : NULL;
     if (kind == 1 && (e->dispcnt & 0x40000000) && !ext) return;
     int32_t tiles_w = w >> 3;
+    if (pc == 0 && kind <= 1) {
+        // Not rotated (scaled or not): the same map row for the whole line; the tile changes every 8 texels.
+        int32_t sy = ry >> 8;
+        if (wrap) sy &= h - 1;
+        else if ((uint32_t) sy >= (uint32_t) h) return;
+        uint32_t map_row = screen_base + (uint32_t) ((sy >> 3) * tiles_w) * (kind == 1 ? 2 : 1);
+        uint32_t ty = sy & 7;
+        int32_t cur_tile = -1;
+        const uint8_t *row = NULL; // the 8 texels of the current tile on this line
+        const uint16_t *pal = e->pal;
+        bool hflip = false;
+        for (int x = 0; x < 256; x++, rx += pa) {
+            int32_t sx = rx >> 8;
+            if (wrap) sx &= w - 1;
+            else if ((uint32_t) sx >= (uint32_t) w) continue;
+            int32_t tile_x = sx >> 3;
+            if (tile_x != cur_tile) {
+                cur_tile = tile_x;
+                if (kind == 0) {
+                    uint32_t tile = bg8(e, map_row + tile_x);
+                    row = bg_at(e, char_base + tile * 64 + ty * 8);
+                } else {
+                    uint16_t entry = bg16(e, map_row + tile_x * 2);
+                    uint32_t r = entry & 0x800 ? 7 - ty : ty;
+                    row = bg_at(e, char_base + (entry & 0x3ff) * 64 + r * 8);
+                    hflip = entry & 0x400;
+                    pal = ext ? ext + (entry >> 12) * 256 : e->pal;
+                }
+                if (row && !(((const uint32_t *) row)[0] | ((const uint32_t *) row)[1])) row = NULL;
+            }
+            if (!row) continue;
+            uint32_t n = row[hflip ? 7 - (sx & 7) : sx & 7];
+            if (n) PUT(e, x, pal[n] & 0x7fff, bg);
+        }
+        return;
+    }
+    if (pa == 0 && kind <= 1) {
+        // Turned by a quarter (the race map): the same map column for the whole line; the tile changes every 8 texels
+        // down the column.
+        int32_t sx = rx >> 8;
+        if (wrap) sx &= w - 1;
+        else if ((uint32_t) sx >= (uint32_t) w) return;
+        int32_t tile_x = sx >> 3;
+        uint32_t tx = sx & 7;
+        int32_t cur_row = -1;
+        const uint8_t *tile_data = NULL; // the current tile (64 bytes)
+        const uint16_t *pal = e->pal;
+        bool vflip = false;
+        uint32_t col = tx;
+        for (int x = 0; x < 256; x++, ry += pc) {
+            int32_t sy = ry >> 8;
+            if (wrap) sy &= h - 1;
+            else if ((uint32_t) sy >= (uint32_t) h) continue;
+            int32_t tile_y = sy >> 3;
+            if (tile_y != cur_row) {
+                cur_row = tile_y;
+                if (kind == 0) {
+                    uint32_t tile = bg8(e, screen_base + tile_y * tiles_w + tile_x);
+                    tile_data = bg_at(e, char_base + tile * 64);
+                    col = tx;
+                    vflip = false;
+                } else {
+                    uint16_t entry = bg16(e, screen_base + (tile_y * tiles_w + tile_x) * 2);
+                    tile_data = bg_at(e, char_base + (entry & 0x3ff) * 64);
+                    col = entry & 0x400 ? 7 - tx : tx;
+                    vflip = entry & 0x800;
+                    pal = ext ? ext + (entry >> 12) * 256 : e->pal;
+                }
+            }
+            if (!tile_data) continue;
+            uint32_t r = vflip ? 7 - (sy & 7) : sy & 7;
+            uint32_t n = tile_data[r * 8 + col];
+            if (n) PUT(e, x, pal[n] & 0x7fff, bg);
+        }
+        return;
+    }
     for (int x = 0; x < 256; x++, rx += pa, ry += pc) {
         int32_t sx = rx >> 8, sy = ry >> 8;
         if (wrap) {
@@ -303,6 +380,7 @@ static inline uint16_t sprite_texel(const F2 *e, const Sprite *s, int tx, int ty
 // Draws the sprites of line y into oc/op/oa. Returns the set of priorities present (bit p).
 static uint32_t sprites_line(F2 *e, int y) {
     uint32_t prios = 0;
+    e->line_semi = false;
     if (!e->sprite_count) return 0;
     memset(e->op, 4, sizeof(e->op));
     if (e->obj_window) memset(e->ow, 0, sizeof(e->ow));
@@ -330,7 +408,48 @@ static uint32_t sprites_line(F2 *e, int y) {
                     e->op[x] = s->prio;
                     e->oa[x] = alpha;
                     prios |= 1u << s->prio;
+                    e->line_semi |= alpha != 0xff;
                 }
+            }
+        } else if (s->mode != 3) {
+            // Regular sprites: one row of character data per 8 pixels.
+            int ty = s->vflip ? s->h - 1 - dy : dy;
+            for (int bx = x0; bx < x1;) {
+                int tx = s->hflip ? s->w - 1 - bx : bx;
+                int cell_x = tx >> 3;
+                const uint8_t *row;
+                if (s->c256) {
+                    uint32_t addr = map1d ? s->tile * bound + ((ty >> 3) * (s->w >> 3) + cell_x) * 64
+                                          : s->tile * 32 + (ty >> 3) * 32 * 32 + cell_x * 64;
+                    row = obj_at(e, addr + (ty & 7) * 8);
+                } else {
+                    uint32_t cell = map1d ? (ty >> 3) * (s->w >> 3) + cell_x : (ty >> 3) * 32 + cell_x;
+                    row = obj_at(e, (map1d ? s->tile * bound : s->tile * 32) + cell * 32 + (ty & 7) * 4);
+                }
+                // The pixels of this cell: up to the next cell boundary in texel space.
+                int run = s->hflip ? (tx & 7) + 1 : 8 - (tx & 7);
+                if (run > x1 - bx) run = x1 - bx;
+                if (row) {
+                    const uint16_t *pal = s->c256 ? (e->objext && (e->dispcnt & 0x80000000u) ? e->objext + s->pal * 256
+                                                                                              : e->pal + 256)
+                                                  : e->pal + 256 + s->pal * 16;
+                    for (int k = 0; k < run; k++) {
+                        int t = s->hflip ? tx - k : tx + k;
+                        uint32_t n = s->c256 ? row[t & 7] : (row[(t & 7) >> 1] >> ((t & 1) * 4)) & 15;
+                        if (!n) continue;
+                        int x = s->x + bx + k;
+                        if (s->mode == 2) {
+                            e->ow[x] = 1;
+                        } else if (s->prio <= e->op[x]) {
+                            e->oc[x] = pal[n] | 0x8000;
+                            e->op[x] = s->prio;
+                            e->oa[x] = alpha;
+                            prios |= 1u << s->prio;
+                            e->line_semi |= alpha != 0xff;
+                        }
+                    }
+                }
+                bx += run;
             }
         } else {
             int ty = s->vflip ? s->h - 1 - dy : dy;
@@ -345,6 +464,7 @@ static uint32_t sprites_line(F2 *e, int y) {
                     e->op[x] = s->prio;
                     e->oa[x] = alpha;
                     prios |= 1u << s->prio;
+                    e->line_semi |= alpha != 0xff;
                 }
             }
         }
@@ -371,7 +491,8 @@ static void windows_line(F2 *e, int y) {
         if (!in_y) continue;
         uint8_t m = (winin >> (w * 8)) & 0x3f;
         for (int x = 0; x < 256; x++) {
-            bool in_x = x1 <= x2 ? (x >= x1 && x < x2) : (x >= x1 || x < x2);
+            int xx = x > 254 ? 254 : x; // a window ending at 255 covers the last column too (as gpu2d.c)
+            bool in_x = x1 <= x2 ? (xx >= x1 && xx < x2) : (xx >= x1 || xx < x2);
             if (in_x) e->mask[x] = m;
         }
     }
@@ -470,6 +591,7 @@ bool fast2d_render_engine(const FrameSnapshot *f, bool is_a, Fast2dEngineOut *ou
     if (evb > 16) evb = 16;
     if (evy > 16) evy = 16;
     if ((effect == 2 || effect == 3) && evy == 0) effect = 0;
+    if ((bldcnt & 0x3f) == 0 || (effect == 1 && (bldcnt & 0x3f00) == 0)) effect = 0; // no target: no effect
     uint16_t backdrop = e->pal[0] & 0x7fff;
     uint32_t prio[4];
     for (int bg = 0; bg < 4; bg++) prio[bg] = io16(e, 0x08 + bg * 2) & 3;
@@ -478,21 +600,17 @@ bool fast2d_render_engine(const FrameSnapshot *f, bool is_a, Fast2dEngineOut *ou
     e->masked = (e->dispcnt & 0xe000) != 0;
     e->obj_window = false;
     for (int i = 0; i < e->sprite_count; i++) e->obj_window |= e->sprites[i].mode == 2;
-    // Second layer needed: alpha blending (effect 1), semi-transparent or bitmap sprites, or split mode (to know
-    // whether a 2D pixel blends with the 3D layer).
-    bool any_semi = false;
-    for (int i = 0; i < e->sprite_count; i++) any_semi |= e->sprites[i].mode == 1 || e->sprites[i].mode == 3;
-    e->second = effect == 1 || any_semi;
-    bool fx = effect != 0 || any_semi;
-
     for (int y = 0; y < 192; y++) {
+        uint32_t oprios = sprites_line(e, y);
+        // The second layer is needed for alpha blending (effect 1) and semi-transparent or bitmap sprites.
+        e->second = effect == 1 || e->line_semi;
+        bool fx = effect != 0 || e->line_semi;
         for (int x = 0; x < 256; x++) e->c0[x] = backdrop;
         memset(e->l0, L_BD, 256);
         if (e->second) {
             for (int x = 0; x < 256; x++) e->c1[x] = backdrop;
             memset(e->l1, L_BD, 256);
         }
-        uint32_t oprios = sprites_line(e, y);
         if (e->masked) windows_line(e, y);
         uint16_t *dst = out->out + y * 256;
         bool in_above = false;

@@ -211,6 +211,18 @@ void fast2d_check(const FrameSnapshot *f, uint64_t n) {
                  bad ? "" : " (ok)");
         if (bad) {
             port_log("  first at %d,%d: fast %04x ref %06x", first % 256, first / 256, fast[first], r[first] & 0xffffff);
+            if (getenv("MKDS_F2OAM")) {
+                const uint16_t *oam = (const uint16_t *) (f->oam + eng * 0x400);
+                for (int i = 0; i < 128; i++) {
+                    uint16_t a0 = oam[i * 4], a1 = oam[i * 4 + 1], a2 = oam[i * 4 + 2];
+                    if (!(a0 & 0x100) && (a0 & 0x200)) continue;
+                    int x = a1 & 0x1ff;
+                    if (x >= 256) x -= 512;
+                    port_log("  oam %d x %d y %d shape %d size %d aff %d flip %d%d mode %d c256 %d tile %d prio %d", i, x,
+                             a0 & 0xff, a0 >> 14, a1 >> 14, (a0 >> 8) & 1, (a1 >> 12) & 1, (a1 >> 13) & 1,
+                             (a0 >> 10) & 3, (a0 >> 13) & 1, a2 & 0x3ff, (a2 >> 10) & 3);
+                }
+            }
             if (getenv("MKDS_F2DUMP")) {
                 static uint32_t img[256 * 384];
                 for (int i = 0; i < 256 * 192; i++) {

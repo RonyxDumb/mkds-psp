@@ -68,9 +68,14 @@ static void on_frame(const FrameSnapshot *f) {
     if (s_stat_frames == 120) {
         uint64_t total = hapi_now_ns() - s_stat_start;
         extern uint64_t g_psp_idle_ns;
-        port_log("perf: %u frames in %u ms (%u drawn), drawing %u ms, idle %u ms, scene %d", (unsigned) s_stat_frames,
-                 (unsigned) (total / 1000000), (unsigned) s_stat_drawn, (unsigned) (s_stat_render / 1000000),
-                 (unsigned) (g_psp_idle_ns / 1000000), f->scene);
+        extern uint64_t g_video_stats[4];
+        port_log("perf: %u frames in %u ms (%u drawn), drawing %u ms (2D A %u B %u, 3D %u, GE wait %u), idle %u ms, "
+                 "scene %d",
+                 (unsigned) s_stat_frames, (unsigned) (total / 1000000), (unsigned) s_stat_drawn,
+                 (unsigned) (s_stat_render / 1000000), (unsigned) (g_video_stats[0] / 1000),
+                 (unsigned) (g_video_stats[1] / 1000), (unsigned) (g_video_stats[2] / 1000),
+                 (unsigned) (g_video_stats[3] / 1000), (unsigned) (g_psp_idle_ns / 1000000), f->scene);
+        memset(g_video_stats, 0, sizeof(g_video_stats));
         s_stat_start = s_stat_render = s_stat_frames = s_stat_drawn = 0;
         g_psp_idle_ns = 0;
     }

@@ -261,7 +261,11 @@ static float rate_for(uint16_t period, int pitch) {
     return 16756991.0f / t;
 }
 
-static uint64_t step_for(float rate, int output_rate) { return (uint64_t) (uint32_t) (rate / output_rate * 65536.0f) << 16; }
+static uint64_t step_for(float rate, int output_rate) { // 32.32, without doubles
+    float f = rate / output_rate;
+    uint32_t whole = (uint32_t) f;
+    return (uint64_t) whole << 32 | (uint32_t) ((f - whole) * 4294967296.0f);
+}
 
 static const int8_t s_ima_index[8] = {-1, -1, -1, -1, 2, 4, 6, 8};
 static const int16_t s_ima_step[89] = {
@@ -985,40 +989,87 @@ static void output_effect(float *l, float *r, int rate) {
     }
 }
 
+// Mixes n samples of one channel into acc (stereo, gains in 1/4096). PCM channels are read straight from their
+// sample data until the loop point; ADPCM, PSG and noise go through channel_sample.
+static void mix_channel(Channel *c, int32_t *acc, int n) {
+    int32_t gl = (int32_t) (c->gain_l * 4096.0f), gr = (int32_t) (c->gain_r * 4096.0f);
+    if (c->type == CH_PCM && c->format <= 1) {
+        uint64_t pos = c->pos, step = c->step;
+        uint32_t end = c->loop_start + c->loop_len;
+        for (int k = 0; k < n; k++) {
+            uint32_t i = (uint32_t) (pos >> 32);
+            if (i >= end) {
+                c->pos = pos;
+                int smp;
+                if (!channel_sample(c, &smp)) { // past the end: loops, or stops
+                    channel_stop(c);
+                    return;
+                }
+                pos = c->pos;
+                i = (uint32_t) (pos >> 32);
+            }
+            int32_t smp = c->format == 0 ? (int8_t) c->data[i] << 8 : (int16_t) rd16(c->data + i * 2);
+            acc[k * 2] += smp * gl;
+            acc[k * 2 + 1] += smp * gr;
+            pos += step;
+        }
+        c->pos = pos;
+        return;
+    }
+    for (int k = 0; k < n; k++) {
+        int smp;
+        if (!channel_sample(c, &smp)) {
+            channel_stop(c);
+            return;
+        }
+        acc[k * 2] += smp * gl;
+        acc[k * 2 + 1] += smp * gr;
+        uint32_t before = (uint32_t) (c->pos >> 32);
+        c->pos += c->step;
+        if (c->type == CH_NOISE) {
+            for (uint32_t i = before; i < (uint32_t) (c->pos >> 32); i++) {
+                int bit = c->lfsr & 1;
+                c->lfsr >>= 1;
+                if (bit) c->lfsr ^= 0x6000;
+            }
+        }
+    }
+}
+
 void port_snd_render(int16_t *out, int frames, int rate) {
     snd_lock();
     s_output_rate = rate;
     int64_t frame_samples = (int64_t) (FRAME_SECONDS * 65536.0 * rate) << 16;
-    for (int n = 0; n < frames; n++) {
+    static int32_t acc[2 * 1024];
+    int done = 0;
+    while (done < frames) {
         if (s_frame_accum <= 0) {
             driver_frame();
             s_frame_accum += frame_samples;
         }
-        s_frame_accum -= (int64_t) 1 << 32;
-        float l = 0, r = 0;
+        // The samples up to the next driver frame (at most a buffer's worth).
+        int n = (int) ((s_frame_accum + 0xffffffffll) >> 32);
+        if (n > frames - done) n = frames - done;
+        if (n > 1024) n = 1024;
+        memset(acc, 0, (size_t) n * 2 * sizeof(int32_t));
         for (int i = 0; i < CHANNELS; i++) {
-            Channel *c = &s_ch[i];
-            if (!c->active) continue;
-            int s;
-            if (!channel_sample(c, &s)) {
-                channel_stop(c);
-                continue;
-            }
-            l += s * c->gain_l;
-            r += s * c->gain_r;
-            uint32_t before = (uint32_t) (c->pos >> 32);
-            c->pos += c->step;
-            if (c->type == CH_NOISE) {
-                for (uint32_t k = before; k < (uint32_t) (c->pos >> 32); k++) {
-                    int bit = c->lfsr & 1;
-                    c->lfsr >>= 1;
-                    if (bit) c->lfsr ^= 0x6000;
-                }
-            }
+            if (s_ch[i].active) mix_channel(&s_ch[i], acc, n);
         }
-        output_effect(&l, &r, rate);
-        out[n * 2] = (int16_t) (l > 32767 ? 32767 : l < -32768 ? -32768 : l);
-        out[n * 2 + 1] = (int16_t) (r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        int16_t *o = out + done * 2;
+        bool effect = sCallbackInfo.mType != 0;
+        for (int k = 0; k < n; k++) {
+            int32_t l = acc[k * 2] >> 12, r = acc[k * 2 + 1] >> 12;
+            if (effect) {
+                float fl = (float) l, fr = (float) r;
+                output_effect(&fl, &fr, rate);
+                l = (int32_t) fl;
+                r = (int32_t) fr;
+            }
+            o[k * 2] = (int16_t) (l > 32767 ? 32767 : l < -32768 ? -32768 : l);
+            o[k * 2 + 1] = (int16_t) (r > 32767 ? 32767 : r < -32768 ? -32768 : r);
+        }
+        s_frame_accum -= (int64_t) n << 32;
+        done += n;
     }
     hapi_mutex_unlock(s_lock);
 }

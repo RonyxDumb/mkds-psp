@@ -65,6 +65,7 @@ static struct {
     int32_t proj_aspect;   // of the projection matrix
     bool proj_aspect_dirty;
     bool proj_list_dirty; // the projection changed since the last one recorded in the list
+    bool results_dirty;   // the clip / vector matrix result registers are out of date
 } G;
 
 // ------------------------------------------------------------------------------------------------ matrix helpers
@@ -269,6 +270,7 @@ static void emit_polygon(const GxVertex *v, int count) {
     if (!f->proj_aspect) f->proj_aspect = G.proj_aspect;
     memcpy(&f->vertices[f->vertex_count], v, sizeof(GxVertex) * count);
     f->vertex_count += count;
+    IO32(0x604) = f->polygon_count | (f->vertex_count << 16); // list RAM counts
 }
 
 static void submit_vertex(void) {
@@ -618,9 +620,19 @@ static void execute(uint32_t cmd) {
     default: break;
     }
     if (cmd >= 0x10 && cmd <= 0x1c) {
+        G.results_dirty = true; // computed when read (port_gx3d_results)
+    }
+    // GXSTAT changes with the matrix stacks (and the tests, which set their bits); the list RAM counts follow each
+    // polygon (emit_polygon).
+    if ((cmd >= 0x11 && cmd <= 0x14) || cmd >= 0x40) update_gxstat();
+}
+
+// The clip and vector matrix result registers (0x04000640, 0x04000680), for the SDK functions that read them.
+void port_gx3d_results(void) {
+    if (G.results_dirty) {
+        G.results_dirty = false;
         update_result_registers();
     }
-    update_gxstat();
 }
 
 // One parameter word for the command `cmd`: runs the command when its parameters are complete.

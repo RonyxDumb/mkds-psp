@@ -42,11 +42,19 @@ static uint32_t s_tex_bytes;
 static uint32_t s_tex_generation = ~0u;
 static uint32_t *s_decode;
 static uint32_t s_decode_size;
+// Hash of (key, palette) -> index + 1 in s_tex (open addressing).
+#define TEX_HASH 1024
+static uint16_t s_tex_hash[TEX_HASH];
+
+static inline uint32_t tex_hash(uint32_t key, uint32_t pltt) {
+    return ((key * 0x9e3779b1u) ^ (pltt * 0x85ebca6bu)) >> 22;
+}
 
 static void tex_flush(void) {
     for (int i = 0; i < s_tex_count; i++) free(s_tex[i].data);
     s_tex_count = 0;
     s_tex_bytes = 0;
+    memset(s_tex_hash, 0, sizeof(s_tex_hash));
 }
 
 static inline uint16_t to5551(uint32_t c) {
@@ -66,13 +74,19 @@ static const TexEntry *texture(const VramMap *map, uint32_t teximage, uint32_t p
     uint32_t mirror = (teximage >> 16) & (teximage >> 18) & 3;
     uint32_t key = (teximage & 0x3ff0ffff) | mirror << 16;
     uint32_t pkey = fmt == 7 ? 0 : pltt;
-    for (int i = 0; i < s_tex_count; i++) {
-        if (s_tex[i].key == key && s_tex[i].pltt == pkey) return &s_tex[i];
+    uint32_t slot = tex_hash(key, pkey);
+    for (;; slot = (slot + 1) & (TEX_HASH - 1)) {
+        uint32_t i = s_tex_hash[slot];
+        if (!i) break;
+        if (s_tex[i - 1].key == key && s_tex[i - 1].pltt == pkey) return s_tex[i - 1].data ? &s_tex[i - 1] : NULL;
     }
     uint32_t w = TEX_WIDTH(teximage), h = TEX_HEIGHT(teximage);
     uint32_t sw = w << (mirror & 1), sh = h << (mirror >> 1);
     if (sw > 512 || sh > 512) return NULL;
-    if (s_tex_count == TEX_CACHE || s_tex_bytes > TEX_MEMORY) tex_flush();
+    if (s_tex_count == TEX_CACHE || s_tex_bytes > TEX_MEMORY) {
+        tex_flush();
+        slot = tex_hash(key, pkey);
+    }
     if (w * h > s_decode_size) {
         free(s_decode);
         s_decode_size = w * h;
@@ -96,6 +110,7 @@ static const TexEntry *texture(const VramMap *map, uint32_t teximage, uint32_t p
     }
     sceKernelDcacheWritebackRange(data, sw * sh * 2);
     TexEntry *t = &s_tex[s_tex_count++];
+    s_tex_hash[slot] = (uint16_t) s_tex_count;
     t->key = key;
     t->pltt = pkey;
     t->data = data;
@@ -377,9 +392,13 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
             }
             const uint16_t *toon = f->toon_table;
             bool highlight = f->disp3dcnt & 2;
+            bool outside = false; // some vertex outside a clipping plane
             for (int k = 0; k < p->count; k++) {
                 const GxVertex *v = &f->vertices[p->first + k];
                 CV *c = &in[k];
+                int32_t aw = v->w < 0 ? -v->w : v->w;
+                outside |= v->z < -v->w || v->z > v->w || v->x > 3 * aw || v->x < -3 * aw || v->y > 3 * aw ||
+                           v->y < -3 * aw;
                 c->x = (float) v->x;
                 c->y = (float) v->y;
                 c->z = (float) v->z;
@@ -399,13 +418,18 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
                     c->b = v->b;
                 }
             }
-            int n = clip_polygon(in, p->count, clipped);
-            if (n < 3) continue;
+            int n = p->count;
+            const CV *poly = in;
+            if (outside) {
+                n = clip_polygon(in, p->count, clipped);
+                if (n < 3) continue;
+                poly = clipped;
+            }
             const float *inv = s_projs[p->proj].inv;
             uint32_t a8 = alpha * 255 / 31;
             GeVertex gv[16];
             for (int k = 0; k < n; k++) {
-                const CV *c = &clipped[k];
+                const CV *c = &poly[k];
                 // View space: clip * P^-1 (row vectors), in 20.12 units like the projection's input.
                 float vx = c->x * inv[0] + c->y * inv[4] + c->z * inv[8] + c->w * inv[12];
                 float vy = c->x * inv[1] + c->y * inv[5] + c->z * inv[9] + c->w * inv[13];
