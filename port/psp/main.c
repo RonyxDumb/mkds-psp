@@ -79,6 +79,14 @@ static void on_frame(const FrameSnapshot *f) {
                  (unsigned) (g_video_stats[1] / 1000), (unsigned) (g_video_stats[2] / 1000),
                  (unsigned) (g_video_stats[3] / 1000), (unsigned) (g_psp_idle_ns / 1000000), f->scene);
         memset(g_video_stats, 0, sizeof(g_video_stats));
+        extern uint32_t g_ge_stats[8];
+        port_log("  3D: %u cache flushes, %u textures decoded (%u Ktexels, %u ms), %u polygons, %u GE vertices, "
+                 "%u batches (%u ms); CPU %d MHz, bus %d MHz",
+                 (unsigned) g_ge_stats[0], (unsigned) g_ge_stats[1], (unsigned) g_ge_stats[2] / 1024,
+                 (unsigned) g_ge_stats[3] / 1000, (unsigned) g_ge_stats[4], (unsigned) g_ge_stats[5],
+                 (unsigned) g_ge_stats[6], (unsigned) g_ge_stats[7] / 1000, scePowerGetCpuClockFrequency(),
+                 scePowerGetBusClockFrequency());
+        memset(g_ge_stats, 0, sizeof(g_ge_stats));
         static int s_mem_log;
         if (s_mem_log++ % 10 == 0) {
             struct mallinfo mi = mallinfo();

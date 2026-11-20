@@ -40,8 +40,6 @@ static TexEntry s_tex[TEX_CACHE];
 static int s_tex_count;
 static uint32_t s_tex_bytes;
 static uint32_t s_tex_generation = ~0u;
-static uint32_t *s_decode;
-static uint32_t s_decode_size;
 // Hash of (key, palette) -> index + 1 in s_tex (open addressing).
 #define TEX_HASH 1024
 static uint16_t s_tex_hash[TEX_HASH];
@@ -50,20 +48,145 @@ static inline uint32_t tex_hash(uint32_t key, uint32_t pltt) {
     return ((key * 0x9e3779b1u) ^ (pltt * 0x85ebca6bu)) >> 22;
 }
 
+// Statistics (psp/main.c logs them): cache flushes, textures decoded, texels decoded, decoding time (us),
+// polygons drawn, GE vertices.
+uint32_t g_ge_stats[8]; // + batches, us spent issuing GE commands
+
 static void tex_flush(void) {
+    g_ge_stats[0]++;
     for (int i = 0; i < s_tex_count; i++) free(s_tex[i].data);
     s_tex_count = 0;
     s_tex_bytes = 0;
     memset(s_tex_hash, 0, sizeof(s_tex_hash));
 }
 
-static inline uint16_t to5551(uint32_t c) {
-    uint32_t r = (c >> 3) & 31, g = (c >> 11) & 31, b = (c >> 19) & 31;
-    return (uint16_t) (r | g << 5 | b << 10 | ((c >> 24) ? 0x8000 : 0));
-}
-static inline uint16_t to4444(uint32_t c) {
-    uint32_t r = (c >> 4) & 15, g = (c >> 12) & 15, b = (c >> 20) & 15, a = ((c >> 24) * 15 + 15) / 31;
+// ------------------------------------------------------------------------------------------------ texture decoding
+// Straight into the GE's 16-bit formats: 5551 (opaque formats, colour 0 transparent), 4444 (A3I5, A5I3). Rows are
+// read through the VRAM map one at a time (a row never crosses a 16 KiB page unless the texture is unaligned: then
+// texel by texel).
+static inline uint16_t c5551(uint16_t c, bool opaque) { return (uint16_t) ((c & 0x7fff) | (opaque ? 0x8000 : 0)); }
+static inline uint16_t c4444(uint16_t c, uint32_t a5) {
+    uint32_t r = (c & 31) >> 1, g = ((c >> 5) & 31) >> 1, b = ((c >> 10) & 31) >> 1, a = (a5 * 15 + 15) / 31;
     return (uint16_t) (r | g << 4 | b << 8 | a << 12);
+}
+
+static const uint8_t *tex_row(const VramMap *map, uint32_t off, uint32_t bytes, uint8_t *tmp) {
+    off &= 0x7ffff;
+    if ((off & 0x3fff) + bytes <= 0x4000) return vram_ptr(map, SNAP_VRAM(NULL), VR_TEX, off);
+    for (uint32_t i = 0; i < bytes; i++) { // crosses a page
+        const uint8_t *p = vram_ptr(map, SNAP_VRAM(NULL), VR_TEX, (off + i) & 0x7ffff);
+        tmp[i] = p ? *p : 0;
+    }
+    return tmp;
+}
+
+static uint16_t pal_entry(const VramMap *map, uint32_t off) {
+    const uint8_t *p = vram_ptr(map, SNAP_VRAM(NULL), VR_TEXPAL, off & 0x1ffff);
+    return p ? (uint16_t) (p[0] | p[1] << 8) : 0;
+}
+
+static bool decode16(const VramMap *map, uint32_t teximage, uint32_t pltt, uint16_t *out, uint32_t stride) {
+    uint32_t fmt = (teximage >> 26) & 7;
+    uint32_t w = TEX_WIDTH(teximage), h = TEX_HEIGHT(teximage);
+    uint32_t addr = (teximage & 0xffff) << 3;
+    bool c0t = teximage & (1u << 29);
+    uint32_t pal = fmt == 2 ? pltt << 3 : pltt << 4;
+    static uint16_t lut[256];
+    static uint8_t tmp[2048];
+    if (fmt == 5) {
+        // 4x4 compressed: blocks of 2-bit texels, a palette index word per block in slot 1.
+        uint32_t slot1 = 0x20000 + ((addr & 0x1ffff) >> 1) + (addr >= 0x40000 ? 0x10000 : 0);
+        for (uint32_t by = 0; by < h / 4; by++) {
+            const uint8_t *bits = tex_row(map, addr + by * (w / 4) * 4, (w / 4) * 4, tmp);
+            const uint8_t *infos = tex_row(map, slot1 + by * (w / 4) * 2, (w / 4) * 2, tmp + 1024);
+            for (uint32_t bx = 0; bx < w / 4; bx++) {
+                uint32_t b = bits ? (uint32_t) bits[bx * 4] | bits[bx * 4 + 1] << 8 | bits[bx * 4 + 2] << 16 |
+                                        (uint32_t) bits[bx * 4 + 3] << 24
+                                  : 0;
+                uint16_t info = infos ? (uint16_t) (infos[bx * 2] | infos[bx * 2 + 1] << 8) : 0;
+                uint32_t pb = pal + (info & 0x3fff) * 4, mode = info >> 14;
+                uint16_t col0 = pal_entry(map, pb), col1 = pal_entry(map, pb + 2);
+                uint16_t cols[4];
+                cols[0] = c5551(col0, true);
+                cols[1] = c5551(col1, true);
+                if (mode == 0 || mode == 2) {
+                    cols[2] = c5551(pal_entry(map, pb + 4), true);
+                    cols[3] = mode == 2 ? c5551(pal_entry(map, pb + 6), true) : 0;
+                } else {
+                    uint16_t m1 = 0, m2 = 0;
+                    for (int s = 0; s < 15; s += 5) {
+                        uint32_t x0 = (col0 >> s) & 31, x1 = (col1 >> s) & 31;
+                        if (mode == 1) {
+                            m1 |= (uint16_t) ((x0 + x1) / 2 << s);
+                        } else {
+                            m1 |= (uint16_t) ((x0 * 5 + x1 * 3) / 8 << s);
+                            m2 |= (uint16_t) ((x0 * 3 + x1 * 5) / 8 << s);
+                        }
+                    }
+                    cols[2] = c5551(m1, true);
+                    cols[3] = mode == 1 ? 0 : c5551(m2, true);
+                }
+                uint16_t *o = out + by * 4 * stride + bx * 4;
+                for (uint32_t ty = 0; ty < 4; ty++, b >>= 8) {
+                    o[ty * stride] = cols[b & 3];
+                    o[ty * stride + 1] = cols[(b >> 2) & 3];
+                    o[ty * stride + 2] = cols[(b >> 4) & 3];
+                    o[ty * stride + 3] = cols[(b >> 6) & 3];
+                }
+            }
+        }
+        return true;
+    }
+    if (fmt == 7) {
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *row = tex_row(map, addr + y * w * 2, w * 2, tmp);
+            for (uint32_t x = 0; x < w; x++) {
+                uint16_t c = row ? (uint16_t) (row[x * 2] | row[x * 2 + 1] << 8) : 0;
+                out[y * stride + x] = c;
+            }
+        }
+        return true;
+    }
+    // Paletted formats: the palette converted once.
+    uint32_t colors = fmt == 1 ? 32 : fmt == 2 ? 4 : fmt == 3 ? 16 : fmt == 6 ? 8 : 256;
+    if (fmt == 1 || fmt == 6) {
+        for (uint32_t i = 0; i < colors; i++) lut[i] = pal_entry(map, pal + i * 2);
+    } else {
+        for (uint32_t i = 0; i < colors; i++) lut[i] = c5551(pal_entry(map, pal + i * 2), !(i == 0 && c0t));
+    }
+    uint32_t bpp = fmt == 2 ? 2 : fmt == 3 ? 4 : 8;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = tex_row(map, addr + y * w * bpp / 8, w * bpp / 8, tmp);
+        uint16_t *o = out + y * stride;
+        if (!row) {
+            memset(o, 0, w * 2);
+            continue;
+        }
+        switch (fmt) {
+        case 1: // A3I5
+            for (uint32_t x = 0; x < w; x++) {
+                uint32_t v = row[x], a3 = v >> 5;
+                o[x] = c4444(lut[v & 31], (a3 << 2) + (a3 >> 1));
+            }
+            break;
+        case 6: // A5I3
+            for (uint32_t x = 0; x < w; x++) o[x] = c4444(lut[row[x] & 7], row[x] >> 3);
+            break;
+        case 2:
+            for (uint32_t x = 0; x < w; x++) o[x] = lut[(row[x >> 2] >> ((x & 3) * 2)) & 3];
+            break;
+        case 3:
+            for (uint32_t x = 0; x < w; x += 2) {
+                o[x] = lut[row[x >> 1] & 15];
+                o[x + 1] = lut[row[x >> 1] >> 4];
+            }
+            break;
+        default:
+            for (uint32_t x = 0; x < w; x++) o[x] = lut[row[x]];
+            break;
+        }
+    }
+    return true;
 }
 
 // The texture for TEXIMAGE_PARAM / PLTT_BASE, NULL for none.
@@ -87,28 +210,32 @@ static const TexEntry *texture(const VramMap *map, uint32_t teximage, uint32_t p
         tex_flush();
         slot = tex_hash(key, pkey);
     }
-    if (w * h > s_decode_size) {
-        free(s_decode);
-        s_decode_size = w * h;
-        s_decode = malloc(s_decode_size * 4);
-    }
-    if (!tex_decode(map, SNAP_VRAM(NULL), teximage, pltt, s_decode)) return NULL;
+    uint64_t t_dec = sceKernelGetSystemTimeWide();
+    g_ge_stats[1]++;
+    g_ge_stats[2] += w * h;
     bool translucent = fmt == 1 || fmt == 6;
     uint16_t *data = memalign(16, sw * sh * 2);
     if (!data) {
         tex_flush();
+        slot = tex_hash(key, pkey);
         data = memalign(16, sw * sh * 2);
         if (!data) return NULL;
     }
-    for (uint32_t y = 0; y < sh; y++) {
-        uint32_t ty = y < h ? y : 2 * h - 1 - y;
-        for (uint32_t x = 0; x < sw; x++) {
-            uint32_t tx = x < w ? x : 2 * w - 1 - x;
-            uint32_t c = s_decode[ty * w + tx];
-            data[y * sw + x] = translucent ? to4444(c) : to5551(c);
+    if (!decode16(map, teximage, pltt, data, sw)) {
+        free(data);
+        return NULL;
+    }
+    // Mirrored repeat: the texture doubled, mirrored.
+    if (mirror & 1) {
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) data[y * sw + 2 * w - 1 - x] = data[y * sw + x];
         }
     }
+    if (mirror & 2) {
+        for (uint32_t y = 0; y < h; y++) memcpy(data + (2 * h - 1 - y) * sw, data + y * sw, sw * 2);
+    }
     sceKernelDcacheWritebackRange(data, sw * sh * 2);
+    g_ge_stats[3] += (uint32_t) (sceKernelGetSystemTimeWide() - t_dec);
     TexEntry *t = &s_tex[s_tex_count++];
     s_tex_hash[slot] = (uint16_t) s_tex_count;
     t->key = key;
@@ -421,11 +548,14 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
             st.proj = p->proj;
             memcpy(st.viewport, p->viewport, 4);
             if (!have_prev || memcmp(&st, &prev_state, sizeof(st)) != 0) {
+                uint64_t tb = sceKernelGetSystemTimeWide();
                 if (have_prev && s_vert_count > batch_first) {
                     draw_batch(&prev_state, s_verts + batch_first, (int) (s_vert_count - batch_first));
                 }
                 apply_state(&st, have_prev ? &prev_state : NULL, r, blending);
                 stencil_state(&st);
+                g_ge_stats[6]++;
+                g_ge_stats[7] += (uint32_t) (sceKernelGetSystemTimeWide() - tb);
                 prev_state = st;
                 have_prev = true;
                 batch_first = s_vert_count;
@@ -497,6 +627,8 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
         draw_batch(&prev_state, s_verts + batch_first, (int) (s_vert_count - batch_first));
     }
     sceKernelDcacheWritebackRange(s_verts, sizeof(GeVertex) * s_vert_count);
+    g_ge_stats[4] += f->polygon_count;
+    g_ge_stats[5] += s_vert_count;
 
     sceGuDisable(GU_DEPTH_TEST);
     sceGuDisable(GU_ALPHA_TEST);

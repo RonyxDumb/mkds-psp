@@ -120,13 +120,22 @@ static bool overlaps(uint32_t a, uint32_t a_size, uint32_t b, uint32_t b_size) {
 
 uint32_t g_vram_generation;
 
+static bool texture_role(int bank, uint8_t cnt) {
+    if (!(cnt & 0x80)) return false;
+    uint32_t mst = cnt & 7;
+    if (bank <= VRAM_D) return (mst & 3) == 3; // texture image
+    if (bank <= VRAM_G) return mst == 3;        // texture palette
+    return false;
+}
+
 void port_vram_remap(int bank) {
     static const uint32_t cnt_offset[VRAM_BANK_COUNT] = {0x240, 0x241, 0x242, 0x243, 0x244, 0x245, 0x246, 0x248, 0x249};
     static uint8_t last_cnt[VRAM_BANK_COUNT];
     uint8_t cnt = IO8(cnt_offset[bank]);
     if (cnt != last_cnt[bank]) {
+        // The GPU's texture cache starts again when a bank enters or leaves texture memory (image or palette).
+        if (texture_role(bank, cnt) || texture_role(bank, last_cnt[bank])) g_vram_generation++;
         last_cnt[bank] = cnt;
-        g_vram_generation++; // the GPU's texture cache starts again
     }
     uint32_t base = cpu_address(bank, cnt);
     uint32_t size = g_vram_bank_size[bank];
