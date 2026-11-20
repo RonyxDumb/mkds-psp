@@ -6,6 +6,7 @@
 #include <psppower.h>
 #include <pspdisplay.h>
 #include <dirent.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -76,6 +77,12 @@ static void on_frame(const FrameSnapshot *f) {
                  (unsigned) (g_video_stats[1] / 1000), (unsigned) (g_video_stats[2] / 1000),
                  (unsigned) (g_video_stats[3] / 1000), (unsigned) (g_psp_idle_ns / 1000000), f->scene);
         memset(g_video_stats, 0, sizeof(g_video_stats));
+        static int s_mem_log;
+        if (s_mem_log++ % 10 == 0) {
+            struct mallinfo mi = mallinfo();
+            port_log("memory: heap %u KiB, in use %u KiB, kernel free %u KiB", (unsigned) mi.arena / 1024,
+                     (unsigned) mi.uordblks / 1024, (unsigned) sceKernelTotalFreeMemSize() / 1024);
+        }
         s_stat_start = s_stat_render = s_stat_frames = s_stat_drawn = 0;
         g_psp_idle_ns = 0;
     }
