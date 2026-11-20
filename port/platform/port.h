@@ -108,6 +108,7 @@ void port_input_get(PortInput *out);
 void gx3d_init(void);
 void gx3d_command(uint32_t cmd, uint32_t param); // one command parameter word (cmd = command id)
 void gx3d_fifo_write(uint32_t word);              // GXFIFO port: packed commands
+void gx3d_fifo_write_block(const uint32_t *words, uint32_t count);
 void gx3d_port_write(uint32_t addr, uint32_t value); // 0x04000440..0x040005ff command ports
 void gx3d_vblank(void);                           // apply a pending SWAP_BUFFERS
 

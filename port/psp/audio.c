@@ -9,8 +9,8 @@
 
 void port_snd_render(int16_t *out, int frames, int rate);
 
-#define AUDIO_RATE 44100
-#define AUDIO_FRAMES 1024
+#define AUDIO_RATE 22050 // half the work of 44.1 kHz for the mixer; the DS mixes at 32.7 kHz
+#define AUDIO_FRAMES 512
 
 static int16_t __attribute__((aligned(64))) s_buffers[2][AUDIO_FRAMES * 2];
 

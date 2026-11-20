@@ -162,19 +162,33 @@ void video_present(const FrameSnapshot *f) {
         for (int i = 0; i < 2; i++) s_engine[i] = memalign(64, 256 * 192 * 2);
         s_above = memalign(64, 256 * 192 * 4);
     }
-    s_frame_parity ^= 1;
+    static unsigned s_drawn;
+    s_drawn++;
+    s_frame_parity = s_drawn & 1;
     Fast2dEngineOut out[2] = {{s_engine[0], s_above, false, 0}, {s_engine[1], NULL, false, 0}};
     s_shown_layout = current_layout(f);
     ScreenRect top, bottom;
     layout_rects(s_shown_layout, &top, &bottom);
     bool a_top = gpu2d_engine_a_on_top(f);
-    // The screen shown small (the race map) is drawn every other frame.
+    // In races the 2D layers change little (HUD, map): the top screen's are drawn every other frame, the screen
+    // shown small (the map) every third; the 3D layer every frame.
     ScreenRect rect_b = a_top ? bottom : top, rect_a = a_top ? top : bottom;
-    static bool s_b_valid;
-    static Fast2dEngineOut s_b_last;
-    bool skip_b = s_b_valid && rect_b.w < rect_a.w && s_frame_parity;
+    static bool s_a_valid, s_b_valid;
+    static Fast2dEngineOut s_a_last, s_b_last;
+    bool race = f->scene == 2;
+    bool skip_b = s_b_valid && rect_b.w < rect_a.w && s_drawn % 3 != 0;
+    bool skip_a = s_a_valid && race && s_frame_parity && !(f->io[0x67] & 0x80);
     uint64_t t0 = sceKernelGetSystemTimeWide();
-    bool fast = fast2d_render_engine(f, true, &out[0]);
+    bool fast;
+    if (skip_a) {
+        out[0] = s_a_last;
+        out[0].brightness = (uint16_t) (f->io[0x6c] | f->io[0x6d] << 8);
+        fast = true;
+    } else {
+        fast = fast2d_render_engine(f, true, &out[0]);
+        s_a_last = out[0];
+        s_a_valid = fast;
+    }
     uint64_t t1 = sceKernelGetSystemTimeWide();
     if (fast && skip_b) {
         out[1] = s_b_last;
@@ -183,7 +197,8 @@ void video_present(const FrameSnapshot *f) {
         s_b_last = out[1];
         s_b_valid = fast;
     }
-    if (!fast) s_b_valid = false;
+    if (fast && skip_b) out[1].brightness = (uint16_t) (f->io[0x106c] | f->io[0x106d] << 8);
+    if (!fast) s_a_valid = s_b_valid = false;
     uint64_t t2 = sceKernelGetSystemTimeWide();
     g_video_stats[0] += t1 - t0;
     g_video_stats[1] += t2 - t1;

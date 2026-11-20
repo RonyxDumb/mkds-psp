@@ -44,8 +44,9 @@ Screen layouts: by default races show the top screen as large as the PSP's scree
 touch screen large, top screen only, side by side (and back to automatic after the last one).
 
 ## Performance
-The game runs at its full speed (60 frames per second) on a PSP at 333 MHz; the picture is drawn as often as there
-is time for it (about 30 to 40 frames per second in races), the rest are skipped without slowing the game down.
+The game runs at its full speed (60 frames per second) on a PSP at 333 MHz; the picture is drawn at most 30 times
+per second, fewer when there is no time for it, without slowing the game down. In races the HUD is redrawn every
+other picture and the map every third; sound is mixed at 22 kHz.
 
 ## Building
 Requirements: the [PSP SDK](https://github.com/pspdev/pspdev) (`psp-cmake`), CMake, Ninja, Python 3.

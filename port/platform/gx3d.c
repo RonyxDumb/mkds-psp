@@ -660,7 +660,7 @@ void gx3d_port_write(uint32_t addr, uint32_t value) {
 
 // GXFIFO: a word holding up to four command ids, then their parameters. A command without parameters takes no word,
 // except when the whole packed word is 0.
-void gx3d_fifo_write(uint32_t word) {
+static inline __attribute__((always_inline)) void fifo_word(uint32_t word) {
     if (G.packed_left == 0) {
         G.packed = word;
         G.packed_left = 4;
@@ -708,6 +708,11 @@ void gx3d_fifo_write(uint32_t word) {
     }
 }
 
+void gx3d_fifo_write(uint32_t word) { fifo_word(word); }
+// A block of GXFIFO words (display lists sent by DMA or CPU copy).
+void gx3d_fifo_write_block(const uint32_t *words, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++) fifo_word(words[i]);
+}
 void gx3d_command(uint32_t cmd, uint32_t param) { feed(cmd, param); }
 
 // ------------------------------------------------------------------------------------------------ frames

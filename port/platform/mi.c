@@ -23,9 +23,7 @@ static inline bool is_gxfifo(const volatile void *p) { return (uintptr_t) p == G
 
 static void send_words(const u32 *src, uintptr_t dst, u32 bytes) {
     if (dst == GXFIFO_ADDR) {
-        for (u32 i = 0; i < bytes / 4; i++) {
-            gx3d_fifo_write(src[i]);
-        }
+        gx3d_fifo_write_block((const uint32_t *) src, bytes / 4);
     } else if (dst >= G3_PORTS_START && dst < G3_PORTS_END) {
         for (u32 i = 0; i < bytes / 4; i++) {
             gx3d_port_write((u32) dst, src[i]);

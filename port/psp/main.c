@@ -62,7 +62,9 @@ static void on_frame(const FrameSnapshot *f) {
         video_present(f);
         s_stat_drawn++;
         uint64_t d = hapi_now_ns() - t0;
+        // At most 30 pictures per second: the CPU time left goes to the game, which must keep its 60.
         to_skip = (int) (d / 16683000);
+        if (to_skip < 1) to_skip = 1;
         if (to_skip > MAX_SKIP) to_skip = MAX_SKIP;
     }
     s_stat_render += hapi_now_ns() - t0;
