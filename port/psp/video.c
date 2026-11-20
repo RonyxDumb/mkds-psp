@@ -183,12 +183,24 @@ static bool engine_output(const FrameSnapshot *f, int eng, bool redraw, Fast2dEn
         return false;
     }
     sceKernelDcacheWritebackRange(o.out, 256 * 192 * 2);
-    if (o.split) sceKernelDcacheWritebackRange(o.above, 256 * 192 * 4);
+    if (o.split) sceKernelDcacheWritebackRange(o.above, 256 * 192 * (o.above_5551 ? 2 : 4));
     s_engine_buf[eng] = buf;
     s_engine_out[eng] = o;
     s_engine_valid[eng] = true;
     *out = o;
     return true;
+}
+
+// A frame's commands go into a list that is handed to the GE once complete. (In a GU_DIRECT list every draw call
+// tells the GE about the new commands through the kernel: hundreds of system calls per frame on a real PSP.)
+static PspGeContext s_ge_context;
+static void begin_list(void) {
+    sceGuStart(GU_SEND, s_list);
+    sceGuDrawBufferList(GU_PSM_8888, s_draw_buffer, BUF_WIDTH); // a sent list does not set it by itself
+}
+static void send_list(void) {
+    sceGuFinish();
+    sceGuSendList(GU_TAIL, s_list, &s_ge_context);
 }
 
 // Waits for the GE's last frame and shows it.
@@ -246,7 +258,9 @@ void video_present(const FrameSnapshot *f) {
     g_video_stats[1] += t2 - t1;
     if (!fast) {
         // The complete renderer, 3D included.
-        soft3d_render(SNAP_3D(f), f, s_layer3d);
+        const Gx3dFrame *g3 = gx3d_lock_displayed();
+        soft3d_render(g3, f, s_layer3d);
+        gx3d_unlock(g3);
         gpu2d_render(f, s_layer3d, s_screen_tex[0], s_screen_tex[1], 0);
         finish_pending(); // the GE may still read these buffers
         sceKernelDcacheWritebackRange(s_screen_tex[0], 256 * 192 * 4);
@@ -255,7 +269,7 @@ void video_present(const FrameSnapshot *f) {
 
     // The last frame is done (it was drawing while the CPU worked): show it, and draw this one.
     finish_pending();
-    sceGuStart(GU_DIRECT, s_list);
+    begin_list();
     sceGuClearColor(0xff000000);
     sceGuClear(GU_COLOR_BUFFER_BIT);
     sceGuTexFlush();
@@ -276,23 +290,24 @@ void video_present(const FrameSnapshot *f) {
             draw_texture(out[eng].out, GU_PSM_5551, r);
             if (eng == 0 && out[0].split) {
                 uint64_t t3 = sceKernelGetSystemTimeWide();
-                ge3d_draw(SNAP_3D(f), f, r);
+                const Gx3dFrame *g3 = gx3d_lock_displayed();
+                ge3d_draw(g3, f, r);
+                gx3d_unlock(g3);
                 g_video_stats[2] += sceKernelGetSystemTimeWide() - t3;
                 sceGuEnable(GU_BLEND);
-                draw_texture(out[0].above, GU_PSM_8888, r);
+                draw_texture(out[0].above, out[0].above_5551 ? GU_PSM_5551 : GU_PSM_8888, r);
                 sceGuDisable(GU_BLEND);
             }
             if (eng == 0 && out[0].capture) {
                 // Read back what engine A shows (before its master brightness) into the VRAM bank.
-                sceGuFinish();
+                send_list();
                 sceGuSync(0, 0);
                 static uint32_t capture_px[256 * 192];
                 const uint32_t *fb = (const uint32_t *) ((uintptr_t) sceGeEdramGetAddr() + (uintptr_t) CAPTURE_BUFFER);
                 fb = (const uint32_t *) ((uintptr_t) fb | 0x40000000u); // uncached
                 for (int y = 0; y < 192; y++) memcpy(capture_px + y * 256, fb + y * BUF_WIDTH, 256 * 4);
                 gpu2d_capture(f, capture_px, capture_px);
-                sceGuStart(GU_DIRECT, s_list);
-                sceGuDrawBufferList(GU_PSM_8888, s_draw_buffer, BUF_WIDTH);
+                begin_list();
                 sceGuScissor(0, 0, SCR_WIDTH, SCR_HEIGHT);
                 if (shown.w <= 0) continue;
                 sceGuTexMode(GU_PSM_8888, 0, 0, 0);
@@ -305,8 +320,9 @@ void video_present(const FrameSnapshot *f) {
         }
     }
     input_draw_pointer();
-    sceGuFinish();
-    s_list_pending = true; // shown at the next frame, once the GE is done
+    send_list();
+    s_list_pending = true;
+    finish_pending(); // shown from the next VBlank (this thread waits; the game runs meanwhile)
 }
 
 void video_message(const char *text) {

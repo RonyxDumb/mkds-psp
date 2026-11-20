@@ -19,6 +19,7 @@ typedef struct Fast2dEngineOut {
     bool split;          // set when `above` was written (the 3D layer is shown between `out` and `above`)
     uint16_t brightness; // MASTER_BRIGHT, for the GPU to apply
     bool capture;        // engine A: display capture is on (DISPCAPCNT): the caller captures what it shows
+    bool above_5551;     // `above` holds BGR555 | 0x8000 texels (no blending with the 3D layer), 0 = transparent
 } Fast2dEngineOut;
 
 // Renders engine A (is_a) or B. Returns false when the engine uses something this renderer does not do. Display

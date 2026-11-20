@@ -55,9 +55,10 @@ static struct {
     int param_index;
     uint32_t packed, packed_left;
     // output
-    Gx3dFrame frames[2];
+    Gx3dFrame frames[3]; // building, displayed, and the one a renderer thread may still be reading
     int building; // index of the list being built
-    int displayed;
+    volatile int displayed;
+    volatile int reading; // locked by the renderer (gx3d_lock_displayed), -1 none
     bool swap_pending;
     uint32_t swap_param;
     uint32_t draw_tag;
@@ -765,10 +766,28 @@ void gx3d_init(void) {
     G.viewport[3] = 191;
     G.building = 0;
     G.displayed = 1;
+    G.reading = -1;
     update_gxstat();
 }
 
 const Gx3dFrame *gx3d_displayed(void) { return &G.frames[G.displayed]; }
+
+// A renderer in another thread locks the displayed list while it reads it: new lists are built in the other buffers.
+const Gx3dFrame *gx3d_lock_displayed(void) {
+    int d;
+    do {
+        d = G.displayed;
+        G.reading = d;
+        __asm__ volatile("" ::: "memory");
+    } while (d != G.displayed);
+    return &G.frames[d];
+}
+
+void gx3d_unlock(const Gx3dFrame *f) {
+    g_gx3d_drawn_serial = f->serial;
+    __asm__ volatile("" ::: "memory");
+    G.reading = -1;
+}
 
 static void latch_render_registers(Gx3dFrame *f) {
     f->disp3dcnt = IO16(0x060);
@@ -812,7 +831,14 @@ void gx3d_vblank(void) {
     if (!G.lite) {
         done->serial = ++serial;
         G.displayed = G.building;
-        G.building ^= 1;
+        __asm__ volatile("" ::: "memory");
+        int locked = G.reading;
+        for (int i = 0; i < 3; i++) {
+            if (i != G.displayed && i != locked) {
+                G.building = i;
+                break;
+            }
+        }
     } // a lite list is dropped: the last complete one stays displayed
     Gx3dFrame *next = building();
     // The next list is lite while the displayed one has not been drawn yet (and not during display capture, which

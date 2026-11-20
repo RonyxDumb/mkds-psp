@@ -46,7 +46,22 @@ void psp_show_fatal(void) {
 // VBlank, so the game always keeps its 60 frames per second and the picture takes the time that is left. At each
 // VBlank the game thread only reads the controls and captures the frame's registers (frame.c).
 static void *s_frame_sem;
-static uint64_t s_stat_render, s_stat_drawn;
+static uint64_t s_stat_render, s_stat_drawn, s_stat_render_cpu;
+
+// Pictures at a steady rhythm: one every s_cadence VBlanks (1: 60 per second, 2: 30, 3: 20, 4: 15), adapted to
+// what the PSP manages: a picture that is not done when the next one is due counts as late; several late ones slow
+// the rhythm down, a long run of pictures done with time to spare speeds it up.
+static int s_cadence = 2;
+static volatile bool s_render_busy;
+static volatile uint64_t s_render_started_ns, s_render_took_ns;
+static int s_late, s_on_time_quick, s_window;
+
+static uint64_t thread_cpu_us(void) {
+    SceKernelThreadRunStatus st;
+    st.size = sizeof(st);
+    if (sceKernelReferThreadRunStatus(0, &st) < 0) return 0;
+    return ((uint64_t) st.runClocks.hi << 32) | st.runClocks.low;
+}
 
 static void render_thread(void *arg) {
     (void) arg;
@@ -54,10 +69,32 @@ static void render_thread(void *arg) {
         hapi_sem_wait(s_frame_sem);
         const FrameSnapshot *f = port_frame_acquire();
         if (!f) continue;
-        uint64_t t0 = hapi_now_ns();
+        s_render_busy = true;
+        uint64_t t0 = hapi_now_ns(), c0 = thread_cpu_us();
         video_present(f);
-        s_stat_render += hapi_now_ns() - t0;
+        uint64_t took = hapi_now_ns() - t0;
+        s_render_took_ns = took;
+        s_stat_render += took;
+        s_stat_render_cpu += thread_cpu_us() - c0;
         s_stat_drawn++;
+        s_render_busy = false;
+    }
+}
+
+static void pace(void) {
+    static uint64_t s_vblank;
+    s_vblank++;
+    if (s_vblank % (uint64_t) s_cadence != 0) return;
+    if (s_render_busy) {
+        s_late++; // the last picture is not done: this one is skipped
+    } else {
+        if (s_render_took_ns && s_render_took_ns < (uint64_t) (s_cadence - 1) * 16683000 * 3 / 4) s_on_time_quick++;
+        hapi_sem_post(s_frame_sem);
+    }
+    if (++s_window == 60) {
+        if (s_late > 3 && s_cadence < 4) s_cadence++;
+        else if (s_late == 0 && s_on_time_quick == 60 && s_cadence > 1) s_cadence--;
+        s_late = s_on_time_quick = s_window = 0;
     }
 }
 
@@ -68,12 +105,7 @@ static void on_frame(const FrameSnapshot *f) {
     input_poll();
     s_stat_frames++;
 #ifndef PSP_NODRAW // profiling: the game alone
-    // Wake the renderer if it is waiting (at most one pending wake-up).
-    SceKernelSemaInfo info;
-    info.size = sizeof(info);
-    if (sceKernelReferSemaStatus((SceUID) (intptr_t) s_frame_sem, &info) >= 0 && info.currentCount == 0) {
-        hapi_sem_post(s_frame_sem);
-    }
+    pace();
 #endif
     if (s_stat_frames == 120) {
         uint64_t total = hapi_now_ns() - s_stat_start;
@@ -83,11 +115,11 @@ static void on_frame(const FrameSnapshot *f) {
         static unsigned int s_last_waits;
         unsigned int game_frames = g_port_vblank_waits - s_last_waits;
         s_last_waits = g_port_vblank_waits;
-        port_log("perf: %u game frames per second (60 = full speed), %u pictures; %u VBlanks in %u ms; drawing %u ms "
-                 "(2D A %u B %u, 3D %u, GE wait %u), game idle %u ms, scene %d",
+        port_log("perf: %u game frames per second (60 = full speed), %u pictures (1 every %d VBlanks, %u ms CPU each); "
+                 "%u VBlanks in %u ms; drawing %u ms (2D A %u B %u, 3D %u, GE wait %u), game idle %u ms, scene %d",
                  game_frames * 1000 / (unsigned) (total / 1000000 ? total / 1000000 : 1),
-                 (unsigned) s_stat_drawn * 1000 / (unsigned) (total / 1000000 ? total / 1000000 : 1),
-                 (unsigned) s_stat_frames, (unsigned) (total / 1000000), (unsigned) (s_stat_render / 1000000),
+                 (unsigned) s_stat_drawn * 1000 / (unsigned) (total / 1000000 ? total / 1000000 : 1), s_cadence,
+                 (unsigned) (s_stat_drawn ? s_stat_render_cpu / s_stat_drawn / 1000 : 0), (unsigned) s_stat_frames, (unsigned) (total / 1000000), (unsigned) (s_stat_render / 1000000),
                  (unsigned) (g_video_stats[0] / 1000), (unsigned) (g_video_stats[1] / 1000),
                  (unsigned) (g_video_stats[2] / 1000), (unsigned) (g_video_stats[3] / 1000),
                  (unsigned) (g_psp_idle_ns / 1000000), f->scene);
@@ -119,7 +151,7 @@ static void on_frame(const FrameSnapshot *f) {
             port_log("memory: heap %u KiB, in use %u KiB, kernel free %u KiB", (unsigned) mi.arena / 1024,
                      (unsigned) mi.uordblks / 1024, (unsigned) sceKernelTotalFreeMemSize() / 1024);
         }
-        s_stat_start = s_stat_render = s_stat_frames = s_stat_drawn = 0;
+        s_stat_start = s_stat_render = s_stat_frames = s_stat_drawn = s_stat_render_cpu = 0;
         g_psp_idle_ns = 0;
     }
 }

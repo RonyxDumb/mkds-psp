@@ -562,6 +562,7 @@ bool fast2d_render_engine(const FrameSnapshot *f, bool is_a, Fast2dEngineOut *ou
         return false; // main memory display
     }
     out->capture = is_a && (f->io[0x67] & 0x80);
+    out->above_5551 = false;
     for (int bg = 0; bg < 4; bg++) {
         if ((e->dispcnt & (0x100u << bg)) && (io16(e, 0x08 + bg * 2) & 0x40)) return false; // mosaic
     }
@@ -657,7 +658,12 @@ bool fast2d_render_engine(const FrameSnapshot *f, bool is_a, Fast2dEngineOut *ou
                 e->c0[x] = c;
             }
         }
-        if (in_above) {
+        if (in_above && !(bldcnt & 0x100)) {
+            // Nothing blends with the 3D layer: 1-bit alpha is enough (5551, as `out`).
+            uint16_t *above = (uint16_t *) out->above + y * 256;
+            for (int x = 0; x < 256; x++) above[x] = e->l0[x] == L_3D ? 0 : e->c0[x] | 0x8000;
+            out->above_5551 = true;
+        } else if (in_above) {
             uint32_t *above = out->above + y * 256;
             for (int x = 0; x < 256; x++) {
                 uint32_t top = e->l0[x];

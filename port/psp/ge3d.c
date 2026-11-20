@@ -652,6 +652,4 @@ void ge3d_draw(const Gx3dFrame *f, const FrameSnapshot *snap, ScreenRect r) {
     sceGuTexWrap(GU_CLAMP, GU_CLAMP);
     sceGuScissor(0, 0, 480, 272);
     sceGuViewport(2048, 2048, 480, 272);
-    // The list is read: the geometry engine may build the next complete one (gx.h, lite lists).
-    g_gx3d_drawn_serial = f->serial;
 }

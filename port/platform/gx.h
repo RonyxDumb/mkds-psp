@@ -73,6 +73,9 @@ const Gx3dFrame *gx3d_displayed(void);
 // list only once the displayed one has been drawn (the renderer sets g_gx3d_drawn_serial to its serial); in between it
 // keeps the matrices and the test results the game reads, and skips vertices and polygons.
 extern bool g_gx3d_lite_enabled;
+// A renderer in another thread: the displayed list, kept unchanged until unlocked (which also marks it drawn).
+const Gx3dFrame *gx3d_lock_displayed(void);
+void gx3d_unlock(const Gx3dFrame *f);
 extern uint64_t g_gx3d_drawn_serial;
 
 #ifdef __cplusplus
