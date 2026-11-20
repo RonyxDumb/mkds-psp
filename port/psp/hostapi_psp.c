@@ -13,19 +13,25 @@
 #include "psp_port.h"
 
 // ------------------------------------------------------------------------------------------------ log
-static SceUID s_log_fd = -1;
+// The log file is opened, appended to and closed for each line: on a real PSP a file that stays open keeps its old
+// size on the Memory Stick (a crash or HOME loses everything written).
+static char s_log_path[256];
 
 void psp_log_open(const char *path) {
-    s_log_fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    snprintf(s_log_path, sizeof(s_log_path), "%s", path);
+    SceUID fd = sceIoOpen(path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd >= 0) sceIoClose(fd);
 }
 
 void hapi_log(const char *line) {
     // stdout reaches PSPLink and the emulators' logs; the file is for real hardware.
     printf("%s\n", line);
-    if (s_log_fd >= 0) {
-        sceIoWrite(s_log_fd, line, strlen(line));
-        sceIoWrite(s_log_fd, "\n", 1);
-    }
+    if (!s_log_path[0]) return;
+    SceUID fd = sceIoOpen(s_log_path, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+    if (fd < 0) return;
+    sceIoWrite(fd, line, strlen(line));
+    sceIoWrite(fd, "\n", 1);
+    sceIoClose(fd);
 }
 
 void hapi_abort(void) {
